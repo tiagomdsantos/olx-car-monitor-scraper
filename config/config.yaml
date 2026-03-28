@@ -1,0 +1,60 @@
+# config/config.yaml
+
+app:
+  intervalo_scraping_minutos: 30
+  telegram_token: "SEU_TOKEN_AQUI"
+  telegram_chat_id: "SEU_CHAT_ID_AQUI"
+  database_path: "sqlite:///anuncios_vistos.db"
+
+# Nova estrutura: Lista de locais para o robô varrer
+localizacoes:
+  - estado: "ba"
+    regiao: "salvador"
+  - estado: "ba"
+    regiao: "feira-de-santana-e-regiao" # Expandindo para o interior próximo
+  - estado: "se"
+    regiao: "todas" # Exemplo: buscar no estado vizinho inteiro (Sergipe)
+
+filtros_globais:
+  ano_minimo: 2019
+  preco_maximo_global: 115000
+  motor_minimo: "1.2"
+  fipe_alerta_abaixo_de_percentual: 75
+  fipe_oportunidade_ate_percentual: 95
+
+veiculos:
+  - marca: "toyota"
+    modelo: "corolla"
+    preco_maximo: 115000 
+    versoes_aceitas: ["todas"]
+
+  - marca: "honda"
+    modelo: "city"
+    complemento_busca: "hatch" 
+    preco_maximo: 115000 
+    versoes_aceitas: ["exl", "touring"]
+
+  - marca: "honda"
+    modelo: "wr-v"
+    preco_maximo: 105000 
+    versoes_aceitas: ["ex", "exl"]
+
+  - marca: "nissan"
+    modelo: "kicks"
+    preco_maximo: 110000
+    versoes_aceitas: ["advance", "exclusive", "sv", "sl"]
+
+  - marca: "nissan"
+    modelo: "sentra"
+    preco_maximo: 115000
+    versoes_aceitas: ["advance", "exclusive", "sv", "sl"]
+
+  - marca: "nissan"
+    modelo: "versa" 
+    preco_maximo: 95000 
+    versoes_aceitas: ["advance", "exclusive", "sv", "sl"]
+
+  - marca: "toyota"
+    modelo: "yaris"
+    preco_maximo: 105000
+    versoes_aceitas: ["xs", "xls"]
