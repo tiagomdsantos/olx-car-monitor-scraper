@@ -1,91 +1,74 @@
 # core/evaluator.py
 import logging
-from typing import List
+import html
 from core.models import Anuncio
-from core.interfaces import INotifier, IRepository, IFipeClient
-from config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 class CarEvaluator:
-    """
-    O Cérebro do sistema. Valida anúncios baseados nas regras de 
-    negócio e decide quais notificações enviar.
-    """
-    def __init__(self, settings: Settings, fipe_client: IFipeClient, 
-                 repository: IRepository, notifier: INotifier):
+    def __init__(self, settings, fipe_client, repository, notifier):
+        """
+        Orquestra a lógica de decisão: Filtragem -> Consulta FIPE -> Notificação.
+        """
         self.settings = settings
         self.fipe_client = fipe_client
         self.repository = repository
         self.notifier = notifier
 
-    def avaliar_lista(self, anuncios: List[Anuncio]):
-        """Processa uma lista de anúncios extraídos do Scraper."""
+    def avaliar_lista(self, anuncios):
+        """Processa uma lista de anúncios extraídos do scraper."""
         for anuncio in anuncios:
             try:
                 self.processar_anuncio(anuncio)
             except Exception as e:
-                logger.error(f"Erro ao avaliar anúncio {anuncio.id_anuncio}: {e}")
+                logger.error(f"❌ Erro ao avaliar anúncio {anuncio.id_anuncio}: {e}")
 
-    def processar_anuncio(self, anuncio: Anuncio):
-        # 1. Verifica se já foi processado (Memória do Robô)
+    def processar_anuncio(self, anuncio):
+        # 1. Verifica se o anúncio já foi processado anteriormente (Evita spam)
         if self.repository.anuncio_ja_processado(anuncio.id_anuncio):
             return
 
-        # 2. Busca configuração específica do modelo no YAML
-        config_modelo = self._obter_config_veiculo(anuncio.titulo)
-        if not config_modelo:
-            return # Não é um carro que estamos monitorando
-
-        # 3. Validação de Ano e Preço Máximo
+        # 2. Validação de Ano Mínimo (Configurado no seu YAML)
         if anuncio.ano < self.settings.filtros_globais.ano_minimo:
             return
-        if anuncio.preco > config_modelo.preco_maximo:
-            return
 
-        # 4. Validação de Versão (Intermediária/Superior)
-        if not self._validar_versao(anuncio.titulo, config_modelo.versoes_aceitas):
-            return
-
-        # 5. Consulta FIPE e Cálculo Anti-Golpe
+        # 3. Busca o preço da FIPE para o modelo
+        # Passamos a marca/modelo para a API encontrar o código correto
         preco_fipe = self.fipe_client.consultar_preco_medio(
-            config_modelo.marca, config_modelo.modelo, anuncio.ano
+            anuncio.marca, 
+            anuncio.modelo, 
+            anuncio.ano
         )
-        
+
         if preco_fipe > 0:
-            anuncio.preco_fipe_estimado = preco_fipe
-            anuncio.marca = config_modelo.marca
-            anuncio.modelo = config_modelo.modelo
+            percentual_fipe = (anuncio.preco / preco_fipe) * 100
             
-            percentual = (anuncio.preco / preco_fipe) * 100
-            
-            # Regra Anti-Golpe (Filtro do YAML)
-            if percentual < self.settings.filtros_globais.fipe_alerta_abaixo_de_percentual:
-                logger.warning(f"Possível GOLPE detectado ({percentual:.1f}% da FIPE): {anuncio.titulo}")
-                # Salvamos para não analisar de novo, mas não notificamos
-                self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
-                return
+            # 4. Lógica de Filtro de Oportunidade
+            # fipe_alerta_abaixo_de_percentual (ex: 70%): Abaixo disso pode ser golpe
+            # fipe_oportunidade_ate_percentual (ex: 95%): Acima disso é preço de mercado
+            alerta_min = self.settings.filtros_globais.fipe_alerta_abaixo_de_percentual
+            alerta_max = self.settings.filtros_globais.fipe_oportunidade_ate_percentual
 
-            # Se estiver dentro da margem de oportunidade
-            if percentual <= self.settings.filtros_globais.fipe_oportunidade_ate_percentual:
-                self.notifier.enviar_alerta(anuncio, percentual)
-        
-        # 6. Marca como processado para evitar duplicidade
+            if alerta_min <= percentual_fipe <= alerta_max:
+                
+                # Prepara o título para o Telegram (Evita erro 400 Bad Request)
+                titulo_seguro = html.escape(anuncio.titulo)
+                
+                # Montagem da Mensagem em HTML
+                mensagem = (
+                    f"<b>🚀 OPORTUNIDADE EM SALVADOR!</b>\n\n"
+                    f"🚗 <b>{titulo_seguro}</b>\n"
+                    f"💰 Preço: <b>R$ {anuncio.preco:,.2f}</b>\n"
+                    f"📊 FIPE: R$ {preco_fipe:,.2f} ({percentual_fipe:.1f}%)\n"
+                    f"📅 Ano: {anuncio.ano} | 🛣️ KM: {anuncio.km}\n\n"
+                    f"🔗 <a href='{anuncio.link}'>Clique aqui para ver o anúncio</a>"
+                )
+
+                # 5. Envia a notificação
+                self.notifier.enviar_alerta(mensagem)
+            
+            else:
+                logger.info(f"⏭️ Ignorado: {anuncio.id_anuncio} está a {percentual_fipe:.1f}% da FIPE.")
+
+        # 6. Salva no banco de dados para marcar como "visto"
         self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
-
-    def _obter_config_veiculo(self, titulo: str):
-        """Encontra qual regra do YAML se aplica a este anúncio."""
-        titulo_lower = titulo.lower()
-        for v in self.settings.veiculos:
-            # Verifica se Marca e Modelo estão no título
-            if v.marca.lower() in titulo_lower and v.modelo.lower() in titulo_lower:
-                return v
-        return None
-
-    def _validar_versao(self, titulo: str, versoes_aceitas: List[str]) -> bool:
-        """Verifica se o título contém alguma das versões desejadas."""
-        if "todas" in versoes_aceitas:
-            return True
-        
-        titulo_lower = titulo.lower()
-        return any(v.lower() in titulo_lower for v in versoes_aceitas)
