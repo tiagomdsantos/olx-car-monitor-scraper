@@ -1,125 +1,116 @@
 # infrastructure/scrapers/olx_scraper.py
 import re
 import logging
-from typing import List, Optional
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from typing import List
+from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
-
 from core.interfaces import IScraper
 from core.models import Anuncio
+import json
 
 logger = logging.getLogger(__name__)
 
 class OLXPlaywrightScraper(IScraper):
-    """
-    Scraper para a OLX utilizando Playwright para renderizar a página 
-    e BeautifulSoup para extrair os dados do HTML.
-    """
     def __init__(self, headless: bool = True):
         self.headless = headless
 
     def buscar_anuncios(self, url: str) -> List[Anuncio]:
-        """Abre o navegador, acessa a URL e retorna o HTML para ser processado."""
         html_content = ""
         try:
             with sync_playwright() as p:
-                # Lança o navegador Chromium
+                # Lançamos o navegador normalmente
                 browser = p.chromium.launch(headless=self.headless)
+                
+                # Criamos o contexto com User-Agent humano e desativamos o webdriver
                 context = browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    extra_http_headers={"Accept-Language": "pt-BR,pt;q=0.9"}
                 )
+                
                 page = context.new_page()
+
+                # TRUQUE: Remove a flag "navigator.webdriver" que sites usam para detectar bots
+                page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+                logger.info(f"🌐 Acessando OLX: {url}")
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 
-                logger.info(f"Acessando OLX: {url}")
-                # Espera até que a rede fique ociosa (garante que os anúncios carregaram)
-                page.goto(url, wait_until="networkidle", timeout=30000)
+                # Espera o carregamento dinâmico
+                page.wait_for_timeout(5000)
                 
-                # Rola a página um pouco para baixo para forçar o lazy load das imagens/itens
-                page.mouse.wheel(0, 1000)
-                page.wait_for_timeout(2000) # Pausa de 2 segundos
+                # Scroll para garantir que a OLX renderize os cards
+                page.evaluate("window.scrollTo(0, 1200)")
+                page.wait_for_timeout(2000)
                 
                 html_content = page.content()
+                
+                # Salva debug para análise se necessário
+                with open("debug_olx.html", "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                
                 browser.close()
                 
-        except PlaywrightTimeoutError:
-            logger.error("Timeout ao tentar carregar a página da OLX.")
-            return []
         except Exception as e:
-            logger.error(f"Erro inesperado no Playwright: {e}")
+            logger.error(f"❌ Erro no Playwright: {e}")
             return []
 
         return self._parse_html(html_content, url)
+        
 
     def _parse_html(self, html: str, url_origem: str) -> List[Anuncio]:
-            """Lê o código fonte da página e extrai a lista de anúncios de forma resiliente."""
-            soup = BeautifulSoup(html, 'html.parser')
-            anuncios_encontrados = []
+        soup = BeautifulSoup(html, 'html.parser')
+        anuncios_encontrados = []
 
-            # CORREÇÃO 1: Adicionado .* para aceitar a região (ex: /salvador/) no meio da URL
-            cards = soup.find_all('a', href=re.compile(r'olx\.com\.br.*/autos-e-pecas/carros-vans-e-utilitarios'))
+        # 1. Busca o script JSON que contém todos os dados da página
+        script_tag = soup.find('script', id='__NEXT_DATA__')
+        
+        if not script_tag:
+            logger.warning("⚠️ Não foi possível encontrar o JSON de dados da OLX (__NEXT_DATA__).")
+            return []
 
-            for card in cards:
-                try:
-                    link = card.get('href')
-                    if not link or "galeria" in link:
-                        continue
+        try:
+            dados = json.loads(script_tag.string)
+            # A estrutura da OLX é profunda: props -> pageProps -> ads
+            ads = dados.get('props', {}).get('pageProps', {}).get('ads', [])
+            
+            logger.info(f"📊 JSON extraído: {len(ads)} anúncios brutos encontrados.")
 
-                    # Extrai o ID do anúncio a partir da URL
-                    match_id = re.search(r'-(\d+)(?:$|\?)', link)
-                    id_anuncio = match_id.group(1) if match_id else None
-                    if not id_anuncio:
-                        continue
+            for ad in ads:
+                # Extraímos os dados diretamente do dicionário JSON
+                id_anuncio = ad.get('listId')
+                titulo = ad.get('subject', 'Sem título')
+                link = ad.get('url')
+                
+                # Preço: remove caracteres não numéricos
+                preco_raw = str(ad.get('price', '0')).replace('R$', '').replace('.', '').replace(' ', '').strip()
+                preco = float(preco_raw) if preco_raw.isdigit() else 0.0
+                
+                # Mapeia as propriedades (Ano e KM)
+                properties = {p.get('name'): p.get('value') for p in ad.get('properties', [])}
+                
+                # Ano: Tenta pegar de 'vehicle_year' ou 'regdate'
+                ano_val = properties.get('vehicle_year', properties.get('regdate', 0))
+                ano = int(ano_val) if str(ano_val).isdigit() else 0
+                
+                # KM: CORREÇÃO DA VARIÁVEL AQUI
+                km_val = str(properties.get('mileage', '0')).replace('.', '').replace(' ', '')
+                km = int(km_val) if km_val.isdigit() else 0
 
-                    # Extração do Título (Pode ser h2, h3 ou h4 dependendo da versão do site)
-                    titulo_tag = card.find(['h2', 'h3', 'h4'])
-                    titulo = titulo_tag.text.strip() if titulo_tag else "Desconhecido"
+                # Filtro de segurança e integridade
+                if preco > 5000 and ano >= 2010:
+                    anuncios_encontrados.append(Anuncio(
+                        id_anuncio=str(id_anuncio),
+                        titulo=titulo,
+                        preco=preco,
+                        ano=ano,
+                        km=km,
+                        link=link,
+                        marca="", modelo=""
+                    ))
 
-                    preco = 0.0
-                    ano = 0
-                    km = 0
-                    
-                    # CORREÇÃO 2: Pega todos os pedaços de texto dentro do link e varre de forma burra e segura
-                    textos_card = list(card.stripped_strings)
-                    for texto in textos_card:
-                        texto_limpo = texto.lower()
-                        
-                        # Se achar "r$" e ainda não tivermos preço
-                        if 'r$' in texto_limpo and preco == 0.0:
-                            num = re.sub(r'[^\d]', '', texto_limpo)
-                            if num: preco = float(num)
-                            
-                        # Se for exatamente 4 dígitos começando com 20xx e ainda não tivermos ano
-                        elif re.match(r'^20[0-2][0-9]$', texto_limpo.replace('.', '')) and ano == 0:
-                            ano = int(texto_limpo.replace('.', ''))
-                            
-                        # Se tiver "km" no texto
-                        elif 'km' in texto_limpo:
-                            num = re.sub(r'[^\d]', '', texto_limpo)
-                            if num: km = int(num)
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar o JSON da OLX: {e}")
 
-                    # Só adicionamos se tiver preço válido e ano
-                    if preco > 0 and ano > 0:
-                        partes_titulo = titulo.split()
-                        marca = partes_titulo[0] if partes_titulo else "Desconhecida"
-                        modelo = partes_titulo[1] if len(partes_titulo) > 1 else "Desconhecido"
-
-                        anuncio = Anuncio(
-                            id_anuncio=id_anuncio,
-                            titulo=titulo,
-                            preco=preco,
-                            ano=ano,
-                            km=km,
-                            link=link,
-                            marca=marca,
-                            modelo=modelo
-                        )
-                        anuncios_encontrados.append(anuncio)
-
-                except Exception as e:
-                    logger.debug(f"Falha ao extrair dados de um card: {e}")
-                    continue
-
-            # Remove duplicados da própria página
-            anuncios_unicos = {a.id_anuncio: a for a in anuncios_encontrados}.values()
-            return list(anuncios_unicos)
+        lista_final = list({a.id_anuncio: a for a in anuncios_encontrados}.values())
+        logger.info(f"✅ Sucesso: {len(lista_final)} anúncios processados via JSON.")
+        return lista_final
