@@ -30,7 +30,7 @@ def main():
     fipe_client = ParallelumFipeClient()
     repository = SQLiteRepository(settings.app.database_path)
     notifier = TelegramNotifier(settings.app.telegram_token, settings.app.telegram_chat_id)
-    scraper = OLXPlaywrightScraper(headless=False) 
+    scraper = OLXPlaywrightScraper(headless=True) 
     evaluator = CarEvaluator(settings, fipe_client, repository, notifier)
 
     # 3. Loop Principal com Tratamento de Erros

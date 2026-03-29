@@ -1,54 +1,80 @@
 # infrastructure/database/sqlite_repo.py
 import sqlite3
 import logging
+from typing import Optional
 from core.interfaces import IRepository
 
 logger = logging.getLogger(__name__)
 
 class SQLiteRepository(IRepository):
-    """
-    Implementação concreta do repositório utilizando SQLite.
-    Guarda os IDs dos anúncios processados para evitar alertas duplicados.
-    """
     def __init__(self, database_path: str):
-        # Se a string vier com o formato do YAML "sqlite:///nome.db", limpamos o prefixo
         self.db_path = database_path.replace("sqlite:///", "")
-        self._criar_tabela()
+        self._criar_tabelas()
 
     def _get_connection(self):
-        """Abre a ligação à base de dados SQLite."""
         return sqlite3.connect(self.db_path)
 
-    def _criar_tabela(self):
-        """Cria a tabela se ela ainda não existir no ficheiro."""
-        query = '''
+    def _criar_tabelas(self):
+        """Cria as tabelas de processamento e de cache da FIPE."""
+        queries = [
+            '''
             CREATE TABLE IF NOT EXISTS anuncios_processados (
                 id_anuncio TEXT PRIMARY KEY,
                 data_processamento TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        '''
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS cache_fipe (
+                chave_busca TEXT PRIMARY KEY,
+                preco FLOAT,
+                data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            '''
+        ]
         try:
             with self._get_connection() as conn:
-                conn.execute(query)
+                for q in queries:
+                    conn.execute(q)
         except Exception as e:
-            logger.error(f"Erro ao criar a tabela na base de dados: {e}")
+            logger.error(f"❌ Erro ao inicializar tabelas SQLite: {e}")
 
+    # --- Lógica de Anúncios ---
     def anuncio_ja_processado(self, id_anuncio: str) -> bool:
-        """Verifica se um ID de anúncio já existe na base de dados."""
         query = "SELECT 1 FROM anuncios_processados WHERE id_anuncio = ?"
         try:
             with self._get_connection() as conn:
                 cursor = conn.execute(query, (id_anuncio,))
                 return cursor.fetchone() is not None
         except Exception as e:
-            logger.error(f"Erro ao verificar o anúncio {id_anuncio}: {e}")
+            logger.error(f"Erro ao verificar anúncio {id_anuncio}: {e}")
             return False
 
     def salvar_anuncio_processado(self, id_anuncio: str):
-        """Guarda o ID do anúncio. Usa INSERT OR IGNORE para evitar erros de duplicação."""
         query = "INSERT OR IGNORE INTO anuncios_processados (id_anuncio) VALUES (?)"
         try:
             with self._get_connection() as conn:
                 conn.execute(query, (id_anuncio,))
         except Exception as e:
-            logger.error(f"Erro ao guardar o anúncio {id_anuncio}: {e}")
+            logger.error(f"Erro ao guardar anúncio {id_anuncio}: {e}")
+
+    # --- Lógica de Cache FIPE ---
+    def obter_preco_cache(self, marca: str, modelo: str, ano: int) -> Optional[float]:
+        chave = f"{marca.lower()}_{modelo.lower()}_{ano}"
+        query = "SELECT preco FROM cache_fipe WHERE chave_busca = ?"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (chave,))
+                res = cursor.fetchone()
+                return res[0] if res else None
+        except Exception as e:
+            logger.error(f"Erro ao ler cache FIPE: {e}")
+            return None
+
+    def salvar_preco_cache(self, marca: str, modelo: str, ano: int, preco: float):
+        chave = f"{marca.lower()}_{modelo.lower()}_{ano}"
+        query = "INSERT OR REPLACE INTO cache_fipe (chave_busca, preco) VALUES (?, ?)"
+        try:
+            with self._get_connection() as conn:
+                conn.execute(query, (chave, preco))
+        except Exception as e:
+            logger.error(f"Erro ao salvar cache FIPE: {e}")
