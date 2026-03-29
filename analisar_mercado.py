@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 def gerar_graficos_por_modelo(db_path="data/anuncios.db"):
     """
-    Analisa o banco de dados, gera gráficos individuais por modelo
-    e um gráfico extra com as Top 10 Oportunidades Gerais (melhor Score).
+    Analisa o banco, identifica versões (XEi, EXL, XS, XLS), calcula Scores 
+    e gera o Top 10 Geral + Modelos Específicos com Fallback Híbrido.
     """
     if not os.path.exists(db_path):
         logger.error(f"❌ Banco de dados não encontrado em {db_path}")
@@ -19,11 +19,11 @@ def gerar_graficos_por_modelo(db_path="data/anuncios.db"):
 
     try:
         conn = sqlite3.connect(db_path)
-        # Seleciona apenas anúncios com dados completos para o Score
+        # Query aberta para permitir fallback de anúncios sem FIPE
         query = """
             SELECT titulo, preco_anuncio, preco_fipe, percentual_fipe, km, ano, link, bairro
             FROM anuncios_detalhados 
-            WHERE preco_anuncio > 5000 AND km > 0 AND preco_fipe > 0
+            WHERE preco_anuncio > 5000 AND km > 0
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
@@ -32,146 +32,146 @@ def gerar_graficos_por_modelo(db_path="data/anuncios.db"):
         return []
 
     if df.empty:
-        logger.warning("⚠️ Banco de dados vazio ou sem anúncios precificados.")
+        logger.warning("⚠️ Banco de dados vazio ou sem anúncios válidos.")
         return []
 
-    # --- 1. Motores de Inferência e Score (Réplica do Evaluator) ---
-    def inferir_modelo(titulo):
+    # --- 1. MOTORES DE INFERÊNCIA DE VERSÃO E SCORE ---
+    
+    def identificar_versao_precisa(titulo):
+        """Identifica a versão exata usando split() para evitar confusão entre XL, XS e XLS."""
+        t = str(titulo).lower().replace('-', ' ').replace('.', ' ')
+        tokens = t.split()
+        
+        # Ordem de prioridade para siglas que podem estar contidas em outras
+        # (Ex: XLS deve ser checado antes de XL)
+        versoes_alvo = [
+            "xls", "xs", "xl", "xei", "altis", "gli", "gr-sport", 
+            "exclusive", "advance", "sense", "exl", "touring", "ex", "lx"
+        ]
+        
+        for v in versoes_alvo:
+            if v in tokens:
+                return v.upper()
+        return ""
+
+    def inferir_modelo_base(titulo):
         t = str(titulo).lower()
-        modelos = ["corolla", "civic", "city", "kicks", "versa", "sentra", "hb20", "creta", "hr-v", "wr-v", "fit"]
+        modelos = ["corolla", "civic", "city", "kicks", "versa", "sentra", "hb20", "creta", "hr-v", "fit", "yaris"]
         for m in modelos:
             if m in t: return m.capitalize()
         return "Outros"
 
-    def calcular_score_grafico(row):
-        """Calcula Score (0-100) baseada em Preço (50%), Uso (30%) e Idade (20%)."""
+    def calcular_score_hibrido(row):
+        """Calcula Score se houver FIPE. Caso contrário, retorna None."""
+        if pd.isna(row['preco_fipe']) or row['preco_fipe'] <= 0:
+            return None
+            
         score = 0
-        # A) Preço vs FIPE (50%): 80% FIPE = 50pts | 100% FIPE = 0pts
+        # A) Preço vs FIPE (50%)
         score += max(0, (100 - row['percentual_fipe']) * 2.5)
-        # B) KM/Uso (30%): 7k km/ano = 30pts | 17k km/ano = 0pts
+        # B) KM/Uso (30%)
         idade = max(1, datetime.now().year - row['ano'])
         km_ano = row['km'] / idade
         score += max(0, (17000 - km_ano) * 0.003 * 10)
-        # C) Idade (20%): Novo (0 anos) = 20pts | Velho (10 anos) = 0pts
+        # C) Idade (20%)
         score += max(0, (10 - idade) * 2)
         return round(min(100, score), 1)
 
-    # Aplica os motores ao DataFrame
-    df['modelo_ref'] = df['titulo'].apply(inferir_modelo)
-    df['score'] = df.apply(calcular_score_grafico, axis=1)
+    # Processamento Inicial
+    df['modelo_ref'] = df['titulo'].apply(inferir_modelo_base)
+    df['versao'] = df['titulo'].apply(identificar_versao_precisa)
+    df['score'] = df.apply(calcular_score_hibrido, axis=1)
     
+    # --- 2. FILTRO DE PREFERÊNCIAS (ESTRATÉGIA DE COMPRA) ---
+    # Para o Yaris, você só quer XS ou XLS. O XL (básico) é removido da análise visual.
+    filtro_yaris = (df['modelo_ref'] == 'Yaris') & (~df['versao'].isin(['XS', 'XLS']))
+    df = df[~filtro_yaris].copy()
+
     arquivos_gerados = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    
-    # --- 2. GERAÇÃO DO GRÁFICO: TOP 10 OPORTUNIDADES GERAIS ---
-    logger.info("📈 Gerando gráfico do Top 10 Geral de Oportunidades...")
-    
-    # Seleciona os 10 melhores Scores absolutos do banco
-    df_geral = df.sort_values(by='score', ascending=False).head(10).copy()
+
+    # --- 3. LÓGICA DE SELEÇÃO TOP 10 (COM FALLBACK) ---
+    def selecionar_melhores(dataframe):
+        """Prioriza Score Alto -> Menor Preço -> Ano Mais Novo."""
+        com_score = dataframe[dataframe['score'].notnull()].sort_values(by='score', ascending=False)
+        sem_score = dataframe[dataframe['score'].isnull()].sort_values(by=['preco_anuncio', 'ano'], ascending=[True, False])
+        return pd.concat([com_score, sem_score]).head(10)
+
+    # --- 4. GERAÇÃO: TOP 10 GERAL ---
+    df_geral = selecionar_melhores(df)
     
     if not df_geral.empty:
-        nome_arquivo_geral = f"analise_top10geral_{timestamp}.png"
+        logger.info("📈 Gerando Top 10 Geral (Filtrado)...")
+        nome_gr_geral = f"analise_top10geral_{timestamp}.png"
         
         plt.figure(figsize=(12, 7))
-        
-        # Gráfico de Dispersão Geral (Scatter)
         scatter = plt.scatter(
-            df_geral['km'], 
-            df_geral['preco_anuncio'], 
-            c=df_geral['score'], 
-            cmap='RdYlGn', 
-            s=250, # Bolhas ligeiramente maiores no Geral
-            edgecolors='black', 
-            alpha=0.9,
-            vmin=60, vmax=100
+            df_geral['km'], df_geral['preco_anuncio'], 
+            c=df_geral['score'].fillna(0), cmap='RdYlGn', 
+            s=280, edgecolors='black', alpha=0.9, vmin=50, vmax=100
         )
 
-        # Labels específicos para o Top 10 (Mostra Modelo e Score)
         for i, row in df_geral.iterrows():
+            label_carro = f"{row['modelo_ref'].upper()} {row['versao']}".strip()
+            label_score = f"{row['score']}pts" if pd.notnull(row['score']) else "S/ FIPE"
+            
             plt.annotate(
-                f"{row['modelo_ref'].upper()}\n{row['ano']} | {row['score']}pts",
+                f"{label_carro}\n{row['ano']} | {label_score}",
                 (row['km'], row['preco_anuncio']),
-                xytext=(0, 12), 
-                textcoords='offset points', 
-                ha='center', fontsize=9, fontweight='bold',
+                xytext=(0, 12), textcoords='offset points', ha='center', 
+                fontsize=9, fontweight='bold',
                 bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.7, ec='none')
             )
 
-        # Estilização do Gráfico Geral
-        plt.title(f'Analise: Top 10 Melhores Oportunidades em Salvador\n(Ordenado por Score Técnico)', fontsize=14, fontweight='bold', pad=20)
-        plt.xlabel('Quilometragem Total (KM)', fontsize=11)
-        plt.ylabel('Preço de Venda (R$)', fontsize=11)
+        plt.title('Melhores Oportunidades em Salvador (Filtro Personalizado)', fontsize=14, fontweight='bold', pad=20)
+        plt.xlabel('Quilometragem Total (KM)')
+        plt.ylabel('Preço de Venda (R$)')
         plt.grid(True, linestyle=':', alpha=0.6)
-        
-        # Formatação de eixos
         plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'R${x:,.0f}'))
-        plt.gca().xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f} KM'))
         
-        # Barra lateral de Score
-        cbar = plt.colorbar(scatter)
-        cbar.set_label('Score de Oportunidade (0-100)', rotation=270, labelpad=15)
-
         plt.tight_layout()
-        plt.savefig(nome_arquivo_geral, dpi=130) # DPI maior para o Geral
+        plt.savefig(nome_gr_geral, dpi=130)
         plt.close()
-        arquivos_gerados.append(nome_arquivo_geral)
+        arquivos_gerados.append(nome_gr_geral)
 
-    # --- 3. LOOP DE GERAÇÃO: GRÁFICOS INDIVIDUAIS POR MODELO ---
+    # --- 5. GERAÇÃO: GRÁFICOS POR MODELO ---
     for modelo in df['modelo_ref'].unique():
         if modelo == "Outros": continue
         
-        # Filtra e pega os 10 melhores daquele modelo
-        df_top_modelo = df[df['modelo_ref'] == modelo].copy()
-        df_top_modelo = df_top_modelo.sort_values(by='score', ascending=False).head(10)
+        df_mod = df[df['modelo_ref'] == modelo]
+        df_top_modelo = selecionar_melhores(df_mod)
 
         if df_top_modelo.empty: continue
         
-        logger.info(f"📈 Gerando gráfico individual para: {modelo}")
-
+        logger.info(f"📈 Gerando gráfico para: {modelo}")
         plt.figure(figsize=(12, 7))
         
-        # Gráfico do Modelo (Scatter)
-        scatter_mod = plt.scatter(
-            df_top_modelo['km'], 
-            df_top_modelo['preco_anuncio'], 
-            c=df_top_modelo['score'], 
-            cmap='RdYlGn', 
-            s=200, edgecolors='black', alpha=0.85,
-            vmin=50, vmax=100
+        plt.scatter(
+            df_top_modelo['km'], df_top_modelo['preco_anuncio'], 
+            c=df_top_modelo['score'].fillna(0), cmap='RdYlGn', 
+            s=220, edgecolors='black', alpha=0.85, vmin=50, vmax=100
         )
 
-        # Labels do Modelo (Mostra Ano, Score e Bairro)
         for i, row in df_top_modelo.iterrows():
-            bairro_curto = row['bairro'][:8] if row['bairro'] else 'Salvador'
+            txt_versao = row['versao'] if row['versao'] else "Base"
+            txt_score = f"{row['score']}pts" if pd.notnull(row['score']) else "S/ FIPE"
+            
             plt.annotate(
-                f"{row['ano']} | {row['score']}pts\n{bairro_curto}",
+                f"{txt_versao} | {row['ano']}\n{txt_score}",
                 (row['km'], row['preco_anuncio']),
                 xytext=(0, 10), textcoords='offset points', ha='center',
                 fontsize=9, fontweight='bold',
                 bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.5, ec='none')
             )
 
-        # Estilização do Gráfico do Modelo
-        plt.title(f'Analise de Mercado: {modelo.upper()} em Salvador\n(Top 10 Vagas por Score)', fontsize=14, fontweight='bold', pad=20)
-        plt.xlabel('Quilometragem Total (KM)', fontsize=11)
-        plt.ylabel('Preço de Venda (R$)', fontsize=11)
+        plt.title(f'Mercado: {modelo.upper()} em Salvador (Apenas Alvos)', fontsize=14, fontweight='bold', pad=20)
         plt.grid(True, linestyle=':', alpha=0.6)
-        
-        # Formatação
         plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'R${x:,.0f}'))
-        plt.gca().xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f} KM'))
         
-        # Barra lateral
-        cbar_mod = plt.colorbar(scatter_mod)
-        cbar_mod.set_label('Score de Oportunidade (0-100)', rotation=270, labelpad=15)
-
-        # Nome do arquivo temporário
-        nome_arquivo_modelo = f"analise_{modelo.lower()}_{timestamp}.png"
-        
+        nome_arquivo = f"analise_{modelo.lower()}_{timestamp}.png"
         plt.tight_layout()
-        plt.savefig(nome_arquivo_modelo, dpi=120)
+        plt.savefig(nome_arquivo, dpi=120)
         plt.close()
-        
-        arquivos_gerados.append(nome_arquivo_modelo)
+        arquivos_gerados.append(nome_arquivo)
 
     return arquivos_gerados

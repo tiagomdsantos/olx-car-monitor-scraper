@@ -10,6 +10,22 @@ class CarEvaluator:
         "leilao", "leilão", "sinistro", "recuperado", "rs", "batido", 
         "consta", "finan", "agio", "ágio", "repasse", "pago pra ver", "venda de pecas"
     ]
+    # Mapeamento de termos proibidos com suas respectivas justificativas
+    BLACKLIST_DETALHADA = {
+        "leilao": "Veículo proveniente de leilão (baixa liquidez/recusa de seguro)",
+        "leilão": "Veículo proveniente de leilão (baixa liquidez/recusa de seguro)",
+        "sinistro": "Histórico de acidente grave registrado (Sinistro)",
+        "recuperado": "Veículo recuperado de roubo ou financiamento (chassi remarcado)",
+        "rs": "Recuperado de Sinistro (Consta no documento)",
+        "batido": "Veículo com danos estruturais visíveis ou declarados",
+        "consta": "Possui restrições ou observações no documento (CRLV)",
+        "finan": "Veículo com dívida de financiamento pendente (NP/Finan)",
+        "agio": "Venda de ágio (parcelas em aberto)",
+        "ágio": "Venda de ágio (parcelas em aberto)",
+        "repasse": "Venda abaixo do valor sem garantia mecânica (Risco alto)",
+        "pago pra ver": "Anúncio suspeito ou golpe comum (NP)",
+        "venda de pecas": "Veículo destinado a desmonte, não rodante"
+    }
 
     def __init__(self, settings, fipe_client, repository, notifier):
         self.settings = settings
@@ -45,8 +61,15 @@ class CarEvaluator:
 
         # --- 3. FILTROS DE SEGURANÇA (Blacklist) ---
         titulo_low = anuncio.titulo.lower()
-        if any(termo in titulo_low for termo in self.BLACKLIST):
-            logger.info(f"🚫 Blacklist: {anuncio.id_anuncio} ignorado.")
+        termo_encontrado = next((termo for termo in self.BLACKLIST_DETALHADA if termo in titulo_low), None)
+        
+        if termo_encontrado:
+            motivo = self.BLACKLIST_DETALHADA[termo_encontrado]
+            logger.warning(f"🚫 BLACKLIST: {anuncio.id_anuncio} IGNORADO")
+            logger.warning(f"└─ Termo: '{termo_encontrado}'")
+            logger.warning(f"└─ Motivo: {motivo}")
+            
+            # Salvamos no banco com preco_fipe 0 para análise futura se necessário
             self.repository.salvar_anuncio_completo(anuncio, 0)
             return
 
@@ -181,3 +204,22 @@ class CarEvaluator:
         for m in modelos_alvo:
             if m in t: return m.title()
         return texto.split()[0].capitalize() if texto.split() else "Outros"
+
+    def _inferir_versao(self, titulo):
+        """Identifica a versão específica do carro para uma FIPE mais precisa."""
+        t = titulo.lower()
+        # Mapeamento de versões por relevância
+        versoes = [
+            "xei", "altis", "gli", "dynamic", "gr-sport", # Corolla
+            "exl", "touring", "lx", "ex", "dx",            # Honda (Civic/City/Fit)
+            "advance", "exclusive", "sense", "sv", "sl"     # Nissan Kicks
+        ]
+        for v in versoes:
+            if v in t:
+                return v.upper()
+        return "" # Se não achar, mantém vazio para busca genérica
+
+    def _inferir_modelo_completo(self, titulo):
+        modelo = self._inferir_modelo(titulo)
+        versao = self._inferir_versao(titulo)
+        return f"{modelo} {versao}".strip()
