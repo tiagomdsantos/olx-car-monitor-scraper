@@ -1,5 +1,6 @@
 services:
   monitor-olx:
+    image: monitor-olx-salvador:latest
     build: .
     container_name: monitor_olx_salvador
     restart: always

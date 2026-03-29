@@ -11,6 +11,11 @@ Este é um robô de monitoramento inteligente para encontrar oportunidades de ve
     * Preço máximo personalizado por modelo de carro.
     * Filtro de oportunidade (notifica apenas se o preço for X% abaixo da FIPE).
 * **Dockerizado:** Pronto para rodar 24/7 em qualquer servidor usando Docker e Docker Compose.
+* **Filtros Avançados (v1.1.0)**: * Blacklist: Ignora termos como Leilão, Sinistro, Repasse, RS, etc.
+* **Preço por Modelo**: Limites financeiros específicos para cada veículo configurado.
+* **Trava de Odômetro**: Filtro global de KM máximo e média de KM/Ano (identifica carros de aplicativo ou frotas).
+* **Análise de Oportunidade**: Notifica apenas se o preço estiver dentro da margem % da FIPE desejada.
+* **Dockerizado**: Arquitetura pronta para rodar 24/7 com isolamento total.
 
 ## 🛠️ Tecnologias Utilizadas
 
@@ -31,10 +36,14 @@ Crie um arquivo `.env` na raiz do projeto:
 ```ini
 TELEGRAM_TOKEN=seu_token_aqui
 TELEGRAM_CHAT_ID=seu_chat_id_aqui
+DOCKER_USER=seu_usuario_dockerhub
 ```
 ### 3. Ajustar Filtros
 Edite o arquivo config/config.yaml para definir quais carros e regiões você deseja monitorar:
 ```ini
+filtros_globais:
+  km_maximo_global: 65000
+  km_ano_maximo: 13000
 veiculos:
   - marca: "toyota"
     modelo: "corolla"
@@ -66,10 +75,17 @@ Ranking de lojistas vs particulares.
 
 ## ⚠️ Notas de Versão
 
-* **v1.0.0 (Lançamento Inicial):** * Implementação completa do fluxo Scraper (Playwright) -> Evaluator -> Notificação.
+* **v1.1.0**
+    * Implementação completa do fluxo Scraper (Playwright) -> Evaluator -> Notificação.
     * Sistema de Cache FIPE via SQLite para evitar erros `429 Too Many Requests`.
     * Suporte a Docker e Docker Compose com imagem Playwright v1.58.0.
     * Filtros personalizados por modelo e blacklist de termos (Leilão/Sinistro).
     * Persistência detalhada de dados para análise de mercado em Salvador.
-    
-Desenvolvido para monitoramento de mercado automotivo na Bahia.
+* **v1.0.0 (Lançamento Inicial)**
+    * Lançamento inicial com Scraper Playwright, Cache FIPE e Notificações Telegram.
+
+# 📄 Licença
+Uso livre para fins de estudo e monitoramento de mercado.
+
+# 👨‍💻 Autor
+Tiago Morais

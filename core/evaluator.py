@@ -1,8 +1,8 @@
 # core/evaluator.py
 import logging
 import html
-from core.models import Anuncio
 import datetime
+from core.models import Anuncio
 
 logger = logging.getLogger(__name__)
 
@@ -20,104 +20,101 @@ class CarEvaluator:
         self.notifier = notifier
 
     def avaliar_lista(self, anuncios):
-        for anuncio in anuncios:
+        total = len(anuncios)
+        logger.info(f"🧐 Avaliando lote de {total} anúncios recebidos do Scraper...")
+        for index, anuncio in enumerate(anuncios, 1):
             try:
                 self.processar_anuncio(anuncio)
             except Exception as e:
-                logger.error(f"❌ Erro no Evaluator para o anúncio {anuncio.id_anuncio}: {e}")
+                logger.error(f"❌ [{index}/{total}] Erro crítico no anúncio {anuncio.id_anuncio}: {e}")
 
     def processar_anuncio(self, anuncio):
         # 1. Evitar duplicados
         if self.repository.anuncio_ja_processado(anuncio.id_anuncio):
+            # Log de debug (menos barulhento que info)
+            logger.debug(f"♻️  {anuncio.id_anuncio} já processado anteriormente.")
             return
 
         # 2. Filtro de Blacklist
         titulo_low = anuncio.titulo.lower()
-        if any(termo in titulo_low for termo in self.BLACKLIST):
-            logger.info(f"🚫 Blacklist: {anuncio.id_anuncio} ignorado.")
-            self.repository.salvar_anuncio_completo(anuncio, 0)
-            return# --- NOVO: Filtros de Quilometragem ---
-        
-        # A. KM Absoluto
+        for termo in self.BLACKLIST:
+            if termo in titulo_low:
+                logger.info(f"🚫 Blacklist: ID {anuncio.id_anuncio} ignorado pelo termo '{termo}'")
+                self.repository.salvar_anuncio_completo(anuncio, 0)
+                return
+
+        # 3. Filtros de Quilometragem (v1.1.0)
         km_limite = getattr(self.settings.filtros_globais, 'km_maximo_global', 100000)
         if anuncio.km > km_limite:
-            logger.info(f"🛣️ KM Excessivo: {anuncio.km}km > Limite {km_limite}km")
+            logger.info(f"🛣️  KM Excessivo: ID {anuncio.id_anuncio} com {anuncio.km}km (Limite: {km_limite}km)")
             self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
             return
 
-        # B. Média KM/Ano (Desgaste relativo)
         ano_atual = datetime.datetime.now().year
-        idade_carro = max(1, ano_atual - anuncio.ano) # Evita divisão por zero para carros do ano
+        # Consideramos idade mínima de 1 para evitar divisão por zero e distorção em carros zero
+        idade_carro = max(1, ano_atual - anuncio.ano)
         km_por_ano = anuncio.km / idade_carro
         
         limite_km_ano = getattr(self.settings.filtros_globais, 'km_ano_maximo', 15000)
         if km_por_ano > limite_km_ano:
-            logger.info(f"🏃 Carro muito rodado p/ o ano: {km_por_ano:.0f}km/ano (Limite: {limite_km_ano})")
+            logger.info(f"🏃 Surrado: ID {anuncio.id_anuncio} rodou {km_por_ano:.0f}km/ano (Limite: {limite_km_ano})")
             self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
             return
 
-        # 3. Identificação de Marca/Modelo e Filtro de Preço Específico
+        # 4. Identificação de Marca/Modelo e Filtro de Preço
         marca = self._inferir_marca(anuncio.titulo)
         modelo = self._inferir_modelo(anuncio.titulo)
         
-        # Busca o limite de preço definido para este modelo específico no YAML
-        # Se não encontrar o modelo no config, usa um teto global de 95k
         limite_modelo = self._obter_limite_por_modelo(modelo)
-
         if anuncio.preco > limite_modelo:
-            logger.info(f"💰 Fora do Orçamento ({modelo}): R$ {anuncio.preco:,.2f} > Limite R$ {limite_modelo:,.2f}")
+            logger.info(f"💰 Caro: {modelo} {anuncio.id_anuncio} por R$ {anuncio.preco:,.2f} (Teto: R$ {limite_modelo:,.2f})")
             self.repository.salvar_anuncio_completo(anuncio, 0)
             return
 
-        if anuncio.ano < self.settings.filtros_globais.ano_minimo:
+        if anuncio.ano < getattr(self.settings.filtros_globais, 'ano_minimo', 2010):
+            logger.info(f"👴 Velho: ID {anuncio.id_anuncio} ano {anuncio.ano} abaixo do mínimo.")
             return
 
-        # 4. Consulta FIPE (Cache -> API)
+        # 5. Consulta FIPE (Cache -> API)
+        logger.info(f"🔍 Consultando FIPE para {marca} {modelo} {anuncio.ano}...")
         preco_fipe = self.repository.obter_preco_cache(marca, modelo, anuncio.ano)
+        
         if preco_fipe is None:
             preco_fipe = self.fipe_client.consultar_preco_medio(marca, modelo, anuncio.ano)
             if preco_fipe > 0:
+                logger.info(f"💾 FIPE Atualizada via API: R$ {preco_fipe:,.2f} (Cache salvo)")
                 self.repository.salvar_preco_cache(marca, modelo, anuncio.ano, preco_fipe)
+            else:
+                logger.warning(f"⚠️  FIPE não encontrada para {marca} {modelo} {anuncio.ano}")
 
-        # 5. Avaliação Final e Gravação
+        # 6. Avaliação Final
         if preco_fipe and preco_fipe > 0:
             self.repository.salvar_anuncio_completo(anuncio, preco_fipe)
             
             percentual = (anuncio.preco / preco_fipe) * 100
             alerta_min = self.settings.filtros_globais.fipe_alerta_abaixo_de_percentual
             alerta_max = self.settings.filtros_globais.fipe_oportunidade_ate_percentual
-
+            
             if alerta_min <= percentual <= alerta_max:
-                self._notificar_telegram(anuncio, preco_fipe, percentual)
+                logger.info(f"🎯 OPORTUNIDADE: {modelo} a {percentual:.1f}% da FIPE! Enviando Telegram...")
+                self._notificar_telegram(anuncio, preco_fipe, percentual, km_por_ano)
             else:
-                logger.info(f"⏭️ {modelo} {anuncio.ano}: {percentual:.1f}% da FIPE (Fora da margem)")
+                logger.info(f"⏭️  Fora da margem: {modelo} {anuncio.ano} está a {percentual:.1f}% da FIPE (Alvo: {alerta_min}-{alerta_max}%)")
         else:
             self.repository.salvar_anuncio_completo(anuncio, 0)
 
-
     def _obter_limite_por_modelo(self, modelo_identificado: str) -> float:
-        """Busca o preço máximo no config.yaml baseado na lista de veiculos."""
         modelo_key = modelo_identificado.lower()
-        
-        # O erro acontecia aqui: tentava acessar 'buscas' em vez de 'veiculos'
-        # Usamos getattr por segurança para o robô não travar
         lista_veiculos = getattr(self.settings, 'veiculos', [])
-
         for v in lista_veiculos:
-            # Compara o modelo identificado (ex: Corolla) com o do config
             modelo_config = v.modelo.lower()
             if modelo_config in modelo_key or modelo_key in modelo_config:
                 return float(v.preco_maximo)
         
-        # Fallback: Se não achar o carro específico na lista, usa o preço global
         filtros = getattr(self.settings, 'filtros_globais', None)
         return float(getattr(filtros, 'preco_maximo', 95000))
 
-    def _notificar_telegram(self, anuncio, preco_fipe, percentual):
-        ano_atual = datetime.datetime.now().year
-        idade = max(1, ano_atual - anuncio.ano)
-        media_km = anuncio.km / idade
-        
+    def _notificar_telegram(self, anuncio, preco_fipe, percentual, km_por_ano):
         titulo_seguro = html.escape(anuncio.titulo)
         msg = (
             f"<b>🚀 OPORTUNIDADE EM SALVADOR!</b>\n\n"
@@ -125,7 +122,7 @@ class CarEvaluator:
             f"💰 Preço: <b>R$ {anuncio.preco:,.2f}</b>\n"
             f"📊 FIPE: R$ {preco_fipe:,.2f} ({percentual:.1f}%)\n"
             f"📅 Ano: {anuncio.ano} | 🛣️ KM: {anuncio.km}\n"
-            f"📈 Média: <b>{media_km:.0f} km/ano</b>\n\n"
+            f"📈 Média: <b>{km_por_ano:.0f} km/ano</b>\n\n"
             f"🔗 <a href='{anuncio.link}'>Ver no OLX</a>"
         )
         self.notifier.enviar_alerta(msg)
@@ -139,7 +136,6 @@ class CarEvaluator:
 
     def _inferir_modelo(self, titulo: str) -> str:
         t = titulo.lower()
-        # Modelos que você está monitorando
         modelos_alvo = ["corolla", "city", "wr-v", "kicks", "sentra", "versa", "yaris", "hb20"]
         for m in modelos_alvo:
             if m in t: return m.capitalize()
