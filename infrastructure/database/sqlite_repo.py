@@ -1,4 +1,3 @@
-# infrastructure/database/sqlite_repo.py
 import sqlite3
 import logging
 from datetime import datetime
@@ -54,7 +53,7 @@ class SQLiteRepository(IRepository):
         except Exception as e:
             logger.error(f"❌ Erro ao inicializar tabelas SQLite: {e}")
 
-    # --- Métodos Obrigatórios da Interface IRepository ---
+    # --- Métodos de Verificação e Controle ---
     
     def anuncio_ja_processado(self, id_anuncio: str) -> bool:
         query = "SELECT 1 FROM anuncios_processados WHERE id_anuncio = ?"
@@ -67,7 +66,6 @@ class SQLiteRepository(IRepository):
             return False
 
     def salvar_anuncio_processado(self, id_anuncio: str):
-        """Método exigido pela interface para marcar ID como visto."""
         query = "INSERT OR IGNORE INTO anuncios_processados (id_anuncio) VALUES (?)"
         try:
             with self._get_connection() as conn:
@@ -97,14 +95,11 @@ class SQLiteRepository(IRepository):
         except Exception as e:
             logger.error(f"Erro ao salvar cache FIPE: {e}")
 
-    # --- Lógica de Gravação Detalhada (Análise de Mercado) ---
+    # --- Lógica de Gravação e Atualização (Alerta de Preço) ---
 
     def salvar_anuncio_completo(self, anuncio, preco_fipe: float):
-        """Salva tanto o ID (para evitar spam) quanto os detalhes (para análise)."""
-        # Primeiro, usamos o método padrão para garantir que ele não seja reprocessado
         self.salvar_anuncio_processado(anuncio.id_anuncio)
         
-        # Agora, gravamos os detalhes para o seu "Excel"
         percentual = (anuncio.preco / preco_fipe) * 100 if preco_fipe > 0 else 0
         query_detalhe = '''
             INSERT OR REPLACE INTO anuncios_detalhados 
@@ -114,28 +109,40 @@ class SQLiteRepository(IRepository):
         try:
             with self._get_connection() as conn:
                 conn.execute(query_detalhe, (
-                    anuncio.id_anuncio, 
-                    anuncio.titulo, 
-                    anuncio.preco, 
-                    preco_fipe, 
-                    percentual, 
-                    anuncio.ano, 
-                    anuncio.km, 
-                    anuncio.link, 
-                    getattr(anuncio, 'bairro', 'Salvador')
+                    anuncio.id_anuncio, anuncio.titulo, anuncio.preco, 
+                    preco_fipe, percentual, anuncio.ano, anuncio.km, 
+                    anuncio.link, getattr(anuncio, 'bairro', 'Salvador')
                 ))
         except Exception as e:
             logger.error(f"❌ Erro ao salvar dados detalhados de {anuncio.id_anuncio}: {e}")
 
     def obter_preco_anterior(self, id_anuncio: str) -> float:
-        """Busca o último preço registrado para um anúncio."""
+        """Busca o último preço registrado para um anúncio de forma segura."""
+        query = "SELECT preco_anuncio FROM anuncios_detalhados WHERE id_anuncio = ?"
         try:
-            conn = sqlite3.connect(self.db_path.replace("sqlite:///", ""))
-            cursor = conn.cursor()
-            cursor.execute("SELECT preco_anuncio FROM anuncios_detalhados WHERE id_anuncio = ?", (id_anuncio,))
-            row = cursor.fetchone()
-            conn.close()
-            return float(row[0]) if row else 0.0
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (id_anuncio,))
+                row = cursor.fetchone()
+                return float(row[0]) if row else 0.0
         except Exception as e:
-            logger.error(f"Erro ao obter preço anterior: {e}")
+            logger.error(f"Erro ao obter preço anterior de {id_anuncio}: {e}")
             return 0.0
+
+    def atualizar_preco_anuncio(self, id_anuncio: str, novo_preco: float):
+        """Atualiza o preço e recalcula o percentual da FIPE após uma queda."""
+        try:
+            with self._get_connection() as conn:
+                # Primeiro pegamos a FIPE para recalcular o percentual
+                res = conn.execute("SELECT preco_fipe FROM anuncios_detalhados WHERE id_anuncio = ?", (id_anuncio,)).fetchone()
+                preco_fipe = res[0] if res else 0
+                novo_percentual = (novo_preco / preco_fipe) * 100 if preco_fipe > 0 else 0
+
+                query = '''
+                    UPDATE anuncios_detalhados 
+                    SET preco_anuncio = ?, percentual_fipe = ?, data_captura = CURRENT_TIMESTAMP 
+                    WHERE id_anuncio = ?
+                '''
+                conn.execute(query, (novo_preco, novo_percentual, id_anuncio))
+                logger.info(f"💾 Banco atualizado: {id_anuncio} agora custa R$ {novo_preco:,.2f}")
+        except Exception as e:
+            logger.error(f"Erro ao atualizar preço no banco para {id_anuncio}: {e}")
