@@ -13,9 +13,9 @@ from infrastructure.database.sqlite_repo import SQLiteRepository
 from infrastructure.notifications.telegram_notifier import TelegramNotifier
 from infrastructure.scrapers.olx_scraper import OLXPlaywrightScraper
 from core.evaluator import CarEvaluator
-from analisar_mercado import gerar_graficos_por_modelo
+from analisar_mercado import gerar_graficos_por_modelo, obter_texto_elite
 
-# 1. Configuração de Logs
+# 1. Configuração de Logs e Ambiente
 load_dotenv()
 logging.basicConfig(
     level=logging.INFO, 
@@ -23,19 +23,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Locks e Eventos Globais
+# Locks e Eventos Globais para Sincronização
 db_lock = threading.Lock()
 evento_scan_imediato = threading.Event()
 
 def thread_scraper(settings, repository, scraper, evaluator):
-    """Thread 1: Ciclo de busca persistente com inteligência de intervalo."""
+    """Thread 1: Monitoramento Contínuo da OLX Salvador."""
     logger.info("🧵 Thread SCRAPER ativa.")
-    
     intervalo_min = settings.app.intervalo_scraping_minutos
 
     while True:
         try:
-            # Recupera última execução do banco
+            # Controle de tempo para evitar excesso de requisições
             ultima_str = repository.ler_metadata("ultima_execucao")
             ultima = datetime.fromisoformat(ultima_str) if ultima_str else None
             
@@ -50,26 +49,25 @@ def thread_scraper(settings, repository, scraper, evaluator):
                 logger.info(f"⏳ Standby: Próximo ciclo automático em {int(segundos_espera/60)} min.")
                 evento_scan_imediato.wait(timeout=segundos_espera)
             
-            evento_scan_imediato.clear()
+            evento_scan_imediato.clear() # Limpa o sinal após disparar
 
             logger.info("--- 🔄 INICIANDO VARREDURA OLX SALVADOR ---")
             for local in settings.localizacoes:
                 for veiculo in settings.veiculos:
+                    # Montagem dinâmica da URL OLX
                     url_busca = f"https://www.olx.com.br/autos-e-pecas/carros-vans-e-utilitarios/{veiculo.marca}/{veiculo.modelo}"
                     if getattr(veiculo, 'complemento_busca', None):
                         url_busca += f"/{veiculo.complemento_busca}"
-                    url_busca += f"/estado-{local.estado}"
-                    if local.regiao != "todas":
-                        url_busca += f"/regiao-{local.regiao}"
+                    url_busca += f"/estado-{local.estado}/regiao-{local.regiao}"
 
-                    logger.info(f"🔎 Analisando: {veiculo.modelo}...")
+                    logger.info(f"🔎 Analisando: {veiculo.modelo.upper()} em {local.regiao.upper()}...")
                     
                     with db_lock:
                         anuncios = scraper.buscar_anuncios(url_busca)
                         if anuncios:
                             evaluator.avaliar_lista(anuncios)
 
-            # Salva sucesso no banco para o próximo restart
+            # Registra sucesso
             repository.salvar_metadata("ultima_execucao", datetime.now().isoformat())
             logger.info(f"✅ Varredura concluída às {datetime.now().strftime('%H:%M')}")
 
@@ -78,13 +76,13 @@ def thread_scraper(settings, repository, scraper, evaluator):
             time.sleep(60)
 
 def thread_telegram_listener(settings, repository, notifier):
-    """Thread 2: Console de Comandos e Ajustes de Configuração."""
+    """Thread 2: Interface de Comandos /scan, /grafico, /top e /config."""
     logger.info("🧵 Thread TELEGRAM ativa.")
     
     ultimo_update_id = 0
     token = settings.app.telegram_token
     chat_id_autorizado = str(settings.app.telegram_chat_id)
-    db_path_raw = repository.db_path
+    db_path_raw = repository.db_path.replace("sqlite:///", "") # Ajuste de string para SQLite nativo
 
     while True:
         try:
@@ -101,16 +99,17 @@ def thread_telegram_listener(settings, repository, notifier):
                     if str(msg_obj["chat"]["id"]) != chat_id_autorizado: continue
 
                     # --- COMANDOS OPERACIONAIS ---
-                    if texto in ["/help", "/start", "ajuda"]:
+                    if texto in ["/help", "/start"]:
                         msg_help = (
-                            "<b>🏎️ MONITOR OLX SALVADOR v1.5.0</b>\n"
+                            "<b>🏎️ MONITOR OLX SALVADOR v1.8.5</b>\n"
                             "────────────────────────\n"
-                            "🚀 /scan - Busca Imediata\n"
-                            "📊 /grafico - Mapa de Calor (Top 10)\n"
+                            "🚀 /scan - Varredura Imediata\n"
+                            "🥇 /top - Melhores Ofertas (Geral)\n"
+                            "🥇 /top [modelo] - Melhores de um modelo\n"
+                            "📊 /grafico - Dashboards de Mercado\n"
                             "📈 /status - Saúde do Sistema\n"
-                            "⚙️ /config - Ajustar Pesos Score\n"
-                            "────────────────────────\n"
-                            "🛰️ <b>Status:</b> <code>Online & Vigilante</code>"
+                            "⚙️ /config - Ajustar Pesos do Score\n"
+                            "────────────────────────"
                         )
                         notifier.enviar_alerta(msg_help)
 
@@ -118,11 +117,34 @@ def thread_telegram_listener(settings, repository, notifier):
                         notifier.enviar_alerta("⚡ <b>Sinal enviado!</b> Iniciando varredura...")
                         evento_scan_imediato.set()
 
+                    # --- NOVO COMANDO /TOP (RELATÓRIO DE ELITE) ---
+                    elif texto.startswith("/top"):
+                        parts = texto.split()
+                        modelo_alvo = parts[1] if len(parts) > 1 else None
+                        
+                        notifier.enviar_alerta(f"🥇 <b>Garimpando Top 5 {modelo_alvo or 'Geral'} em Salvador...</b>")
+                        
+                        with db_lock:
+                            relatorio = obter_texto_elite(db_path_raw, modelo_alvo)
+                        notifier.enviar_alerta(relatorio)
+
+                    elif texto == "/grafico":
+                        notifier.enviar_alerta("📊 <b>Gerando Dashboards de Elite...</b>")
+                        with db_lock:
+                            arquivos = gerar_graficos_por_modelo(db_path_raw)
+                        
+                        if not arquivos:
+                            notifier.enviar_alerta("⚠️ Nenhum dado suficiente para gerar gráficos.")
+                        
+                        for img in arquivos:
+                            if os.path.exists(img):
+                                notifier.enviar_grafico(img, "📈 <b>Ranking de Elite</b>")
+                                os.remove(img) # Limpa imagem temporária
+
                     elif texto == "/status":
                         ultima_str = repository.ler_metadata("ultima_execucao")
                         txt_ultima = datetime.fromisoformat(ultima_str).strftime('%H:%M:%S') if ultima_str else "Nunca"
                         
-                        # Pesos Atuais
                         p_pre = repository.ler_metadata("peso_preco") or "50"
                         p_km = repository.ler_metadata("peso_km") or "30"
                         p_id = repository.ler_metadata("peso_idade") or "20"
@@ -132,15 +154,14 @@ def thread_telegram_listener(settings, repository, notifier):
                             total = conn.execute("SELECT COUNT(*) FROM anuncios_detalhados").fetchone()[0]
                             conn.close()
                         
-                        status_txt = (
+                        notifier.enviar_alerta(
                             f"<b>📊 STATUS DO TERMINAL</b>\n\n"
                             f"📦 Banco: <code>{total} anúncios</code>\n"
                             f"🕒 Última: <code>{txt_ultima}</code>\n"
                             f"⚙️ Pesos: <code>💰{p_pre}% | 🛣️{p_km}% | 📅{p_id}%</code>"
                         )
-                        notifier.enviar_alerta(status_txt)
 
-                    # --- COMANDO DE CONFIGURAÇÃO REMOTA ---
+                    # --- CONFIGURAÇÃO REMOTA DE PESOS ---
                     elif texto.startswith("/config"):
                         parts = texto.split()
                         if len(parts) == 4:
@@ -150,39 +171,20 @@ def thread_telegram_listener(settings, repository, notifier):
                                     repository.salvar_metadata("peso_preco", str(p_pre))
                                     repository.salvar_metadata("peso_km", str(p_km))
                                     repository.salvar_metadata("peso_idade", str(p_id))
-                                    
-                                    notifier.enviar_alerta(
-                                        f"⚙️ <b>Configuração Atualizada!</b>\n"
-                                        f"Pesos: Preço {p_pre}% | KM {p_km}% | Idade {p_id}%"
-                                    )
+                                    notifier.enviar_alerta("✅ <b>Pesos atualizados com sucesso!</b>")
                                 else:
-                                    notifier.enviar_alerta("⚠️ <b>Erro:</b> A soma deve ser 100!")
+                                    notifier.enviar_alerta("⚠️ A soma deve ser 100!")
                             except:
-                                notifier.enviar_alerta("⚠️ <b>Erro:</b> Use números inteiros.")
+                                notifier.enviar_alerta("⚠️ Use números inteiros: <code>/config 50 30 20</code>")
                         else:
-                            p_pre = repository.ler_metadata("peso_preco") or "50"
-                            p_km = repository.ler_metadata("peso_km") or "30"
-                            p_id = repository.ler_metadata("peso_idade") or "20"
-                            notifier.enviar_alerta(
-                                f"⚙️ <b>Pesos Atuais:</b>\n💰:{p_pre}% 🛣️:{p_km}% 📅:{p_id}%\n\n"
-                                f"Alterar: <code>/config [preço] [km] [idade]</code>"
-                            )
-
-                    elif texto == "/grafico":
-                        notifier.enviar_alerta("📊 <b>Gerando análise...</b>")
-                        with db_lock:
-                            arquivos = gerar_graficos_por_modelo(db_path_raw)
-                        for img in arquivos:
-                            if os.path.exists(img):
-                                notifier.enviar_grafico(img, "📈 <b>Mapa de Oportunidades</b>")
-                                os.remove(img)
+                            notifier.enviar_alerta("⚙️ <b>Config:</b> Use <code>/config [preco] [km] [idade]</code>")
 
         except Exception as e:
-            logger.error(f"❌ Erro Interface: {e}")
+            logger.error(f"❌ Erro Interface Telegram: {e}")
             time.sleep(5)
 
 def main():
-    logger.info("🚀 MONITOR OLX v1.5.0 INICIADO")
+    logger.info("🚀 MONITOR OLX v1.8.5 - SALVADOR EDITION INICIADO")
     try:
         settings = load_settings()
         repository = SQLiteRepository(settings.app.database_path)
@@ -191,19 +193,21 @@ def main():
         scraper = OLXPlaywrightScraper(headless=True) 
         evaluator = CarEvaluator(settings, fipe_client, repository, notifier)
 
+        # Dispara as Threads
         t1 = threading.Thread(target=thread_scraper, args=(settings, repository, scraper, evaluator), daemon=True)
         t2 = threading.Thread(target=thread_telegram_listener, args=(settings, repository, notifier), daemon=True)
 
         t1.start()
         t2.start()
 
+        # Loop Principal Infinito
         while True:
-            time.sleep(1)
+            time.sleep(10)
 
     except KeyboardInterrupt:
-        logger.info("🛑 Encerrando...")
+        logger.info("🛑 Bot encerrado manualmente.")
     except Exception as e:
-        logger.error(f"💥 Falha: {e}")
+        logger.error(f"💥 Falha Crítica: {e}")
 
 if __name__ == "__main__":
     main()
