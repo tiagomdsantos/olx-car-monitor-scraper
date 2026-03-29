@@ -126,3 +126,32 @@ class SQLiteRepository(IRepository):
                 ))
         except Exception as e:
             logger.error(f"❌ Erro ao salvar dados detalhados de {anuncio.id_anuncio}: {e}")
+
+    def obter_minutos_desde_ultimo_scan(self):
+        """Retorna quantos minutos se passaram desde a última execução, criando a tabela se necessário."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Tenta ler o valor
+                cursor.execute("SELECT (strftime('%s','now') - strftime('%s', valor)) / 60 FROM metadados WHERE chave = 'ultimo_scan'")
+                res = cursor.fetchone()
+                return res[0] if res and res[0] is not None else 999999
+        except sqlite3.OperationalError:
+            # Se a tabela não existir, vamos criá-la agora para evitar o próximo erro
+            self._criar_tabela_metadados()
+            return 999999
+
+    def _criar_tabela_metadados(self):
+        """Cria a tabela de metadados caso ela não exista."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS metadados (chave TEXT PRIMARY KEY, valor TEXT)")
+            conn.commit()
+
+    def atualizar_ultimo_scan(self):
+        """Grava o momento atual como o último scan realizado."""
+        self._criar_tabela_metadados() # Garante que a tabela existe antes de inserir
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO metadados (chave, valor) VALUES ('ultimo_scan', datetime('now'))")
+            conn.commit()
