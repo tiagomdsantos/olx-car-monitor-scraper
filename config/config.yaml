@@ -1,19 +1,15 @@
 # config/config.yaml
 
 app:
-  intervalo_scraping_minutos: 30
+  intervalo_scraping_minutos: 120
   telegram_token: "SEU_TOKEN_AQUI"
   telegram_chat_id: "SEU_CHAT_ID_AQUI"
-  database_path: "sqlite:///anuncios_vistos.db"
+  database_path: "data/anuncios.db"
 
 # Nova estrutura: Lista de locais para o robô varrer
 localizacoes:
   - estado: "ba"
     regiao: "salvador"
-  - estado: "ba"
-    regiao: "feira-de-santana-e-regiao" # Expandindo para o interior próximo
-  - estado: "se"
-    regiao: "todas" # Exemplo: buscar no estado vizinho inteiro (Sergipe)
 
 filtros_globais:
   ano_minimo: 2019

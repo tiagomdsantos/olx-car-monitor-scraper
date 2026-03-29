@@ -75,16 +75,24 @@ class CarEvaluator:
         else:
             self.repository.salvar_anuncio_completo(anuncio, 0)
 
+
     def _obter_limite_por_modelo(self, modelo_identificado: str) -> float:
-        """Busca o preço máximo no config.yaml baseado no modelo."""
+        """Busca o preço máximo no config.yaml baseado na lista de veiculos."""
         modelo_key = modelo_identificado.lower()
-        # Tenta encontrar nas configurações de busca
-        for busca in self.settings.buscas:
-            if busca.modelo.lower() in modelo_key or modelo_key in busca.modelo.lower():
-                return float(busca.preco_maximo)
         
-        # Fallback para o preço global se não achar no loop
-        return float(getattr(self.settings.filtros_globais, 'preco_maximo', 95000))
+        # O erro acontecia aqui: tentava acessar 'buscas' em vez de 'veiculos'
+        # Usamos getattr por segurança para o robô não travar
+        lista_veiculos = getattr(self.settings, 'veiculos', [])
+
+        for v in lista_veiculos:
+            # Compara o modelo identificado (ex: Corolla) com o do config
+            modelo_config = v.modelo.lower()
+            if modelo_config in modelo_key or modelo_key in modelo_config:
+                return float(v.preco_maximo)
+        
+        # Fallback: Se não achar o carro específico na lista, usa o preço global
+        filtros = getattr(self.settings, 'filtros_globais', None)
+        return float(getattr(filtros, 'preco_maximo', 95000))
 
     def _notificar_telegram(self, anuncio, preco_fipe, percentual):
         titulo_seguro = html.escape(anuncio.titulo)

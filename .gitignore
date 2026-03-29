@@ -1,3 +1,5 @@
 .venv
 *.pyc
 .pytest_cache/
+debug_olx.html
+*.db

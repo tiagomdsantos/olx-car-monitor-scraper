@@ -1,4 +1,5 @@
 # config/settings.py
+import os
 import yaml
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -20,7 +21,8 @@ class FiltrosGlobaisConfig(BaseModel):
     motor_minimo: str
     fipe_alerta_abaixo_de_percentual: float = Field(default=75.0)
     fipe_oportunidade_ate_percentual: float = Field(default=95.0)
-
+    complemento_busca: "automatico"
+    
 class VeiculoConfig(BaseModel):
     marca: str
     modelo: str
@@ -28,25 +30,42 @@ class VeiculoConfig(BaseModel):
     preco_maximo: float
     versoes_aceitas: List[str]
 
-class Settings(BaseModel):
-    app: AppConfig
-    localizacoes: List[LocalizacaoConfig]
-    filtros_globais: FiltrosGlobaisConfig
-    veiculos: List[VeiculoConfig]
+class Settings:
+    """Transforma um dicionário em um objeto para acesso via ponto (settings.app.path)."""
+    def __init__(self, adict):
+        for key, value in adict.items():
+            if isinstance(value, dict):
+                value = Settings(value)
+            elif isinstance(value, list):
+                value = [Settings(v) if isinstance(v, dict) else v for v in value]
+            setattr(self, key, value)
 
-def load_settings(yaml_path: str = "config/config.yaml") -> Settings:
-    """
-    Lê o arquivo YAML e retorna um objeto Settings tipado e validado.
-    """
-    caminho = Path(yaml_path)
-    if not caminho.exists():
-        raise FileNotFoundError(f"Arquivo de configuração não encontrado: {caminho.absolute()}")
+def load_settings():
+    """Carrega o YAML e sobrescreve com as Variáveis de Ambiente."""
+    # Localiza o arquivo config.yaml na raiz do projeto
+    base_path = Path(__file__).parent.parent
+    camin_yaml = base_path / "config" / "config.yaml"
+    
+    if not camin_yaml.exists():
+        raise FileNotFoundError(f"Arquivo de configuração não encontrado em: {camin_yaml}")
 
-    with open(caminho, 'r', encoding='utf-8') as file:
-        dados_yaml = yaml.safe_load(file)
+    with open(camin_yaml, "r", encoding="utf-8") as f:
+        config_dict = yaml.safe_load(f)
 
-    # O Pydantic faz a mágica de validar e instanciar tudo aqui
-    return Settings(**dados_yaml)
+    # 1. Prioridade para Variáveis de Ambiente (Docker/Compose)
+    token_env = os.getenv("TELEGRAM_TOKEN")
+    chat_id_env = os.getenv("TELEGRAM_CHAT_ID")
+
+    if token_env:
+        config_dict['app']['telegram_token'] = token_env
+        print("✅ Usando TELEGRAM_TOKEN das variáveis de ambiente.")
+    
+    if chat_id_env:
+        config_dict['app']['telegram_chat_id'] = chat_id_env
+        print("✅ Usando TELEGRAM_CHAT_ID das variáveis de ambiente.")
+
+    # 2. Retorna como objeto Settings para permitir acesso settings.app.xxx
+    return Settings(config_dict)
 
 # Exemplo de uso rápido para teste local:
 if __name__ == "__main__":

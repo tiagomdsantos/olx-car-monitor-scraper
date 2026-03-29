@@ -2,6 +2,7 @@
 import time
 import logging
 import traceback
+import os # Adicionado para criar a pasta data
 from config.settings import load_settings
 from infrastructure.api.fipe_client import ParallelumFipeClient
 from infrastructure.database.sqlite_repo import SQLiteRepository
@@ -19,12 +20,17 @@ logger = logging.getLogger(__name__)
 def main():
     logger.info("🚀 Iniciando o Monitor de Ofertas OLX...")
     
-    # 1. Carregamento de Configurações Inicial
+    # 1. Carregamento de Configurações
     try:
         settings = load_settings()
     except Exception as e:
-        logger.error(f"❌ Erro crítico ao carregar config/config.yaml: {e}")
+        logger.error(f"❌ Erro crítico ao carregar as configurações: {e}")
         return
+
+    # --- CORREÇÃO DO BANCO DE DADOS ---
+    # Garante que a pasta 'data' exista antes de iniciar o SQLite
+    db_path = settings.app.database_path.replace("sqlite:///", "")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
     # 2. Injeção de Dependências
     fipe_client = ParallelumFipeClient()
@@ -33,49 +39,47 @@ def main():
     scraper = OLXPlaywrightScraper(headless=True) 
     evaluator = CarEvaluator(settings, fipe_client, repository, notifier)
 
-    # 3. Loop Principal com Tratamento de Erros
     while True:
         try:
             logger.info("--- 🔄 Iniciando nova rodada de verificação ---")
             
             for local in settings.localizacoes:
                 for veiculo in settings.veiculos:
-                    # Montagem da URL Corrigida (Padrão www.olx.com.br)
-                    url_busca = f"https://www.olx.com.br/autos-e-pecas/carros-vans-e-utilitarios/{veiculo.marca}/{veiculo.modelo}"
+                    # Montagem da URL Corrigida
+                    # Usamos getattr para evitar o erro caso 'complemento_busca' não exista no YAML
+                    marca = veiculo.marca
+                    modelo = veiculo.modelo
+                    complemento = getattr(veiculo, 'complemento_busca', None)
                     
-                    if veiculo.complemento_busca:
-                        url_busca += f"/{veiculo.complemento_busca}"
+                    url_busca = f"https://www.olx.com.br/autos-e-pecas/carros-vans-e-utilitarios/{marca}/{modelo}"
                     
-                    # Filtro de Estado e Região
+                    if complemento:
+                        url_busca += f"/{complemento}"
+                    
                     url_busca += f"/estado-{local.estado}"
                     if local.regiao != "todas":
                         url_busca += f"/regiao-{local.regiao}"
 
-                    logger.info(f"🔎 Buscando: {veiculo.marca} {veiculo.modelo} em {local.regiao}...")
+                    logger.info(f"🔎 Buscando: {marca} {modelo} em {local.regiao}...")
                     
-                    # Executa o Scraper (pode falhar por timeout ou bloqueio)
+                    # Busca e Avaliação
                     anuncios = scraper.buscar_anuncios(url_busca)
                     
-                    if not anuncios:
-                        logger.warning(f"⚠️ Nenhum anúncio extraído para {veiculo.modelo}. Verifique a URL ou conexão.")
-                        continue
+                    if anuncios:
+                        evaluator.avaliar_lista(anuncios)
+                    else:
+                        logger.warning(f"⚠️ Sem anúncios para {modelo}.")
 
-                    # Avalia os resultados
-                    evaluator.avaliar_lista(anuncios)
-
-            logger.info(f"✅ Rodada finalizada. Dormindo por {settings.app.intervalo_scraping_minutos} min.")
-            time.sleep(settings.app.intervalo_scraping_minutos * 60)
+            intervalo = settings.app.intervalo_scraping_minutos
+            logger.info(f"✅ Rodada finalizada em Salvador. Dormindo por {intervalo} min.")
+            time.sleep(intervalo * 60)
 
         except KeyboardInterrupt:
-            logger.info("🛑 Monitoramento interrompido pelo usuário. Saindo...")
+            logger.info("🛑 Monitoramento interrompido. Saindo...")
             break
         except Exception as e:
-            # Este catch captura qualquer erro inesperado (Rede, FIPE fora do ar, Erro de Parsing)
-            # O robô NÃO para, ele apenas loga o erro e tenta novamente na próxima rodada.
-            logger.error(f"🔥 ERRO INESPERADO NA RODADA: {str(e)}")
-            logger.debug(traceback.format_exc()) # Loga o rastro do erro para debug
-            
-            logger.info("⏳ Aguardando 1 minuto antes de tentar recuperar...")
+            logger.error(f"🔥 ERRO INESPERADO: {str(e)}")
+            logger.debug(traceback.format_exc())
             time.sleep(60) 
 
 if __name__ == "__main__":

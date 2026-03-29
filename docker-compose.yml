@@ -1,0 +1,16 @@
+services:
+  monitor-olx:
+    build: .
+    container_name: monitor_olx_salvador
+    restart: always
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - TZ=America/Bahia
+      # Fallback caso o .env não exista, ele tenta ler do sistema
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    # O Playwright precisa de memória compartilhada para o navegador não travar
+    shm_size: '2gb'
