@@ -41,3 +41,17 @@ class TelegramNotifier:
             logger.error(f"❌ Erro fatal ao enviar para Telegram: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"Resposta do Telegram: {e.response.text}")
+
+
+    def enviar_grafico(self, caminho_imagem, legenda="📊 Análise de Mercado atualizada"):
+        """Envia um arquivo de imagem para o chat do Telegram."""
+        url = f"https://api.telegram.org/bot{self.token}/sendPhoto"
+        try:
+            with open(caminho_imagem, 'rb') as photo:
+                files = {'photo': photo}
+                data = {'chat_id': self.chat_id, 'caption': legenda}
+                response = requests.post(url, files=files, data=data)
+                return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Erro ao enviar gráfico para o Telegram: {e}")
+            return False
