@@ -126,3 +126,16 @@ class SQLiteRepository(IRepository):
                 ))
         except Exception as e:
             logger.error(f"❌ Erro ao salvar dados detalhados de {anuncio.id_anuncio}: {e}")
+
+    def obter_preco_anterior(self, id_anuncio: str) -> float:
+        """Busca o último preço registrado para um anúncio."""
+        try:
+            conn = sqlite3.connect(self.db_path.replace("sqlite:///", ""))
+            cursor = conn.cursor()
+            cursor.execute("SELECT preco_anuncio FROM anuncios_detalhados WHERE id_anuncio = ?", (id_anuncio,))
+            row = cursor.fetchone()
+            conn.close()
+            return float(row[0]) if row else 0.0
+        except Exception as e:
+            logger.error(f"Erro ao obter preço anterior: {e}")
+            return 0.0
