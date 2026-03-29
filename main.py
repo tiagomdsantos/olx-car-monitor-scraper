@@ -15,88 +15,80 @@ from infrastructure.scrapers.olx_scraper import OLXPlaywrightScraper
 from core.evaluator import CarEvaluator
 from analisar_mercado import gerar_graficos_por_modelo
 
-# 1. Configuração e Logs
+# 1. Configuração de Ambiente e Logs
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Locks e Eventos Globais
+# Locks e Eventos de Sincronização
 db_lock = threading.Lock()
 evento_scan_imediato = threading.Event()
 
-def gerir_timestamp_execucao(db_path, modo="ler"):
-    """Lê ou grava o horário da última execução no banco de dados."""
-    with db_lock:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        # Cria tabela de metadados se não existir
-        cursor.execute("CREATE TABLE IF NOT EXISTS bot_metadata (chave TEXT PRIMARY KEY, valor TEXT)")
-        
-        if modo == "ler":
-            cursor.execute("SELECT valor FROM bot_metadata WHERE chave = 'ultima_execucao'")
-            row = cursor.fetchone()
-            conn.close()
-            return datetime.fromisoformat(row[0]) if row else None
-        else:
-            ts = datetime.now().isoformat()
-            cursor.execute("INSERT OR REPLACE INTO bot_metadata (chave, valor) VALUES ('ultima_execucao', ?)", (ts,))
-            conn.commit()
-            conn.close()
-
-def thread_scraper(settings, scraper, evaluator, db_path):
-    """Thread 1: Controla o ciclo baseado no histórico real do banco."""
-    logger.info("🧵 Thread SCRAPER iniciada.")
+def thread_scraper(settings, repository, scraper, evaluator):
+    """Thread 1: Ciclo de busca (Wait-First) com persistência no banco."""
+    logger.info("🧵 Thread SCRAPER iniciada e monitorando...")
     
     intervalo_min = settings.app.intervalo_scraping_minutos
 
     while True:
         try:
-            ultima = gerir_timestamp_execucao(db_path, "ler")
+            # Busca última execução no banco (Metadata)
+            ultima_str = repository.ler_metadata("ultima_execucao")
+            ultima = datetime.fromisoformat(ultima_str) if ultima_str else None
+            
             agora = datetime.now()
-
-            # Cálculo de quanto tempo falta baseado na última vez que o bot TRABALHOU
             if ultima:
-                proxima_execucao = ultima + timedelta(minutes=intervalo_min)
-                segundos_espera = (proxima_execucao - agora).total_seconds()
+                proxima = ultima + timedelta(minutes=intervalo_min)
+                segundos_espera = (proxima - agora).total_seconds()
             else:
-                segundos_espera = 0 # Nunca rodou, começa já
+                segundos_espera = 0
 
+            # Lógica de Espera Inteligente
             if segundos_espera > 0:
-                logger.info(f"⏳ Aguardando {int(segundos_espera/60)} min para completar o intervalo desde a última rodada.")
-                # Espera o tempo restante OU o sinal do /scan
-                ativado_por_comando = evento_scan_imediato.wait(timeout=segundos_espera)
-            else:
-                ativado_por_comando = False
+                logger.info(f"⏳ Standby: Próximo ciclo em {int(segundos_espera/60)} min.")
+                evento_scan_imediato.wait(timeout=segundos_espera)
+            
+            # Reseta sinal se foi acordado por /scan
+            evento_scan_imediato.clear()
 
-            # Se foi acordado por comando ou o tempo acabou
-            logger.info("--- 🔄 Iniciando varredura OLX ---")
+            logger.info("--- 🔄 EXECUTANDO VARREDURA OLX SALVADOR ---")
             for local in settings.localizacoes:
                 for veiculo in settings.veiculos:
-                    url_busca = f"https://www.olx.com.br/autos-e-pecas/carros-vans-e-utilitarios/{veiculo.marca}/{veiculo.modelo}"
-                    if getattr(veiculo, 'complemento_busca', None): 
-                        url_busca += f"/{veiculo.complemento_busca}"
+                    marca, modelo = veiculo.marca, veiculo.modelo
+                    complemento = getattr(veiculo, 'complemento_busca', None)
+                    
+                    # Montagem de URL Robusta
+                    url_busca = f"https://www.olx.com.br/autos-e-pecas/carros-vans-e-utilitarios/{marca}/{modelo}"
+                    if complemento: url_busca += f"/{complemento}"
                     url_busca += f"/estado-{local.estado}"
                     if local.regiao != "todas": url_busca += f"/regiao-{local.regiao}"
 
-                    logger.info(f"🔎 Buscando: {veiculo.modelo}...")
-                    anuncios = scraper.buscar_anuncios(url_busca)
-                    if anuncios:
-                        evaluator.avaliar_lista(anuncios)
+                    logger.info(f"🔎 Analisando: {marca} {modelo}...")
+                    
+                    with db_lock:
+                        anuncios = scraper.buscar_anuncios(url_busca)
+                        if anuncios:
+                            evaluator.avaliar_lista(anuncios)
 
-            # Grava no banco que terminou agora
-            gerir_timestamp_execucao(db_path, "gravar")
-            evento_scan_imediato.clear()
-            logger.info(f"✅ Ciclo finalizado. Timestamp guardado no banco.")
+            # Salva sucesso no banco
+            repository.salvar_metadata("ultima_execucao", datetime.now().isoformat())
+            logger.info(f"✅ Ciclo finalizado com sucesso.")
 
         except Exception as e:
             logger.error(f"🔥 Erro na Thread Scraper: {e}")
             time.sleep(60)
 
-def thread_telegram_listener(settings, notifier, db_path):
-    """Thread 2: Interface de comandos via Telegram."""
+def thread_telegram_listener(settings, repository, notifier):
+    """Thread 2: Console de Comandos e Interface do Usuário."""
+    logger.info("🧵 Thread TELEGRAM iniciada e aguardando comandos...")
+    
     ultimo_update_id = 0
     token = settings.app.telegram_token
     chat_id_autorizado = str(settings.app.telegram_chat_id)
+    db_path_raw = repository.db_path
 
     while True:
         try:
@@ -108,87 +100,103 @@ def thread_telegram_listener(settings, notifier, db_path):
                     ultimo_update_id = update["update_id"]
                     if "message" not in update or "text" not in update["message"]: continue
                     
-                    texto = update["message"].get("text", "").lower().strip()
-                    if str(update["message"]["chat"]["id"]) != chat_id_autorizado: continue
+                    msg_obj = update["message"]
+                    texto = msg_obj.get("text", "").lower().strip()
+                    if str(msg_obj["chat"]["id"]) != chat_id_autorizado: continue
 
-                    # --- MENU DE AJUDA ---
-                    if texto in ["/help", "/start", "ajuda", "comandos"]:
+                    # --- MENU CONSOLE STYLE ---
+                    if texto in ["/help", "/start", "ajuda"]:
                         msg_help = (
-                            "<b>🤖 Monitor OLX Salvador - Comandos</b>\n\n"
-                            "🚀 /scan - Força uma busca imediata na OLX.\n"
-                            "📊 /grafico - Gera análise visual (Top 10) por modelo.\n"
-                            "📈 /status - Mostra o total de anúncios e tempo para o próximo ciclo.\n"
-                            "❓ /help - Exibe este menu de ajuda."
+                            "<b>🏎️ MONITOR OLX SALVADOR v1.3.1</b>\n"
+                            "<i>Sua inteligência de mercado em tempo real</i>\n"
+                            "────────────────────────\n"
+                            "<b>💻 CONSOLE DE OPERAÇÃO:</b>\n\n"
+                            "🚀 /scan\n"
+                            "└─ <i>Força a varredura imediata na OLX.</i>\n\n"
+                            "📊 /grafico\n"
+                            "└─ <i>Mapa de calor (Top 10) por Score.</i>\n\n"
+                            "📈 /status\n"
+                            "└─ <i>Saúde do banco e tempo de espera.</i>\n\n"
+                            "❓ /help\n"
+                            "└─ <i>Exibe este console de ajuda.</i>\n"
+                            "────────────────────────\n"
+                            "🛰️ <b>Status:</b> <code>Online & Vigilante</code>\n"
+                            "🎯 <b>Filtro:</b> <code>FIPE &lt; 95% | Score &gt; 70</code>"
                         )
                         notifier.enviar_alerta(msg_help)
 
-                    # --- COMANDOS EXISTENTES ---
                     elif texto == "/scan":
-                        notifier.enviar_alerta("⚡ <b>Forçando Scan...</b> O scraper será acordado imediatamente.")
+                        notifier.enviar_alerta("⚡ <b>Sinal enviado!</b> O scraper está sendo acordado...")
                         evento_scan_imediato.set()
 
                     elif texto == "/status":
-                        ultima = gerir_timestamp_execucao(db_path, "ler")
-                        txt_ultima = ultima.strftime('%H:%M:%S') if ultima else "Nunca"
+                        ultima_str = repository.ler_metadata("ultima_execucao")
+                        txt_ultima = datetime.fromisoformat(ultima_str).strftime('%H:%M:%S') if ultima_str else "Nunca"
                         
                         # Cálculo de tempo restante
                         intervalo = settings.app.intervalo_scraping_minutos
-                        proxima = (ultima + timedelta(minutes=intervalo)) if ultima else datetime.now()
+                        proxima = (datetime.fromisoformat(ultima_str) + timedelta(minutes=intervalo)) if ultima_str else datetime.now()
                         faltam = max(0, int((proxima - datetime.now()).total_seconds() / 60))
 
                         with db_lock:
-                            conn = sqlite3.connect(db_path)
+                            conn = sqlite3.connect(db_path_raw)
                             total = conn.execute("SELECT COUNT(*) FROM anuncios_detalhados").fetchone()[0]
                             conn.close()
                         
                         status_txt = (
-                            f"<b>📊 Status do Sistema</b>\n\n"
-                            f"📦 Banco: <b>{total}</b> anúncios\n"
-                            f"🕒 Última rodada: {txt_ultima}\n"
-                            f"⏳ Próxima rodada em: <b>{faltam} min</b>"
+                            f"<b>📊 STATUS DO TERMINAL</b>\n\n"
+                            f"📦 Banco: <code>{total} anúncios</code>\n"
+                            f"🕒 Última Rodada: <code>{txt_ultima}</code>\n"
+                            f"⏳ Próximo Ciclo: <code>{faltam} minutos</code>\n"
+                            f"🛰️ Scanner: <code>Ativo</code>"
                         )
                         notifier.enviar_alerta(status_txt)
 
                     elif texto == "/grafico":
-                        notifier.enviar_alerta("📊 Gerando análise de mercado... Aguarde.")
+                        notifier.enviar_alerta("📊 <b>Analisando dados...</b> Gerando mapa de calor.")
                         with db_lock:
-                            # Import local para evitar problemas de dependência circular
-                            from analisar_mercado import gerar_graficos_por_modelo
-                            arquivos = gerar_graficos_por_modelo()
+                            arquivos = gerar_graficos_por_modelo(db_path_raw)
                         
                         if not arquivos:
-                            notifier.enviar_alerta("⚠️ Sem dados suficientes para gerar os gráficos.")
+                            notifier.enviar_alerta("⚠️ <b>Erro:</b> Dados insuficientes para análise.")
                         else:
                             for img in arquivos:
                                 if os.path.exists(img):
-                                    # Extrai o nome do modelo do arquivo para a legenda
-                                    nome_modelo = img.split('_')[1].upper() if '_' in img else "GERAL"
-                                    notifier.enviar_grafico(img, f"📈 Top 10 Oportunidades: {nome_modelo}")
+                                    modelo_nome = img.split('_')[1].upper() if '_' in img else "GERAL"
+                                    notifier.enviar_grafico(img, f"📈 Oportunidades: {modelo_nome}")
                                     os.remove(img)
-                            notifier.enviar_alerta("✅ Análise concluída!")
+                            notifier.enviar_alerta("✅ <b>Dashboard enviado!</b>")
 
         except Exception as e:
-            logging.error(f"Erro na Thread Telegram: {e}")
+            logger.error(f"❌ Erro na Interface Telegram: {e}")
             time.sleep(5)
 
 def main():
-    settings = load_settings()
-    db_full_path = settings.app.database_path.replace("sqlite:///", "")
-    os.makedirs(os.path.dirname(db_full_path), exist_ok=True)
+    logger.info("🚀 SISTEMA INICIADO - MONITOR OLX v1.3.1")
+    try:
+        settings = load_settings()
+        
+        # Injeção de Dependências
+        repository = SQLiteRepository(settings.app.database_path)
+        fipe_client = ParallelumFipeClient()
+        notifier = TelegramNotifier(settings.app.telegram_token, settings.app.telegram_chat_id)
+        scraper = OLXPlaywrightScraper(headless=True) 
+        evaluator = CarEvaluator(settings, fipe_client, repository, notifier)
 
-    fipe_client = ParallelumFipeClient()
-    repository = SQLiteRepository(settings.app.database_path)
-    notifier = TelegramNotifier(settings.app.telegram_token, settings.app.telegram_chat_id)
-    scraper = OLXPlaywrightScraper(headless=True) 
-    evaluator = CarEvaluator(settings, fipe_client, repository, notifier)
+        # Configuração das Threads (Ordem Corrigida)
+        t1 = threading.Thread(target=thread_scraper, args=(settings, repository, scraper, evaluator), daemon=True)
+        t2 = threading.Thread(target=thread_telegram_listener, args=(settings, repository, notifier), daemon=True)
 
-    t1 = threading.Thread(target=thread_scraper, args=(settings, scraper, evaluator, db_full_path), daemon=True)
-    t2 = threading.Thread(target=thread_telegram_listener, args=(settings, notifier, db_full_path), daemon=True)
+        t1.start()
+        t2.start()
 
-    t1.start()
-    t2.start()
+        while True:
+            time.sleep(1)
 
-    while True: time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("🛑 Encerrando Terminal...")
+    except Exception as e:
+        logger.error(f"💥 Falha Crítica: {e}")
 
 if __name__ == "__main__":
     main()

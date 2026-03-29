@@ -10,13 +10,13 @@ localizacoes:
     regiao: "salvador"
 
 filtros_globais:
-  ano_minimo: 2019
-  preco_maximo_global: 115000
   motor_minimo: "1.2"
+  km_maximo_global: 100000          # Carros acima disso nem entram no score
+  km_ano_maximo: 16000             # Média de Salvador é alta, mas 16k é o limite do bom senso
+  ano_minimo: 2019                 # Carros mais velhos que 2019 perdem muito score de idade
+  preco_maximo: 115000              # Seu teto orçamentário
   fipe_alerta_abaixo_de_percentual: 75
-  fipe_oportunidade_ate_percentual: 95
-  km_maximo_global: 65000       # Não aceita nada acima disso
-  km_ano_maximo: 10000          # Média aceitável de rodagem por ano
+  fipe_oportunidade_ate_percentual: 95 # Só calcula score e avisa se for abaixo de 95% da FIPE
 
 veiculos:
   - marca: "toyota"

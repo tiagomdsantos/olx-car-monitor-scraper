@@ -19,7 +19,7 @@ class CarEvaluator:
 
     def avaliar_lista(self, anuncios):
         total = len(anuncios)
-        logger.info(f"🧐 Avaliando lote de {total} anúncios recebidos...")
+        logger.info(f"🧐 Avaliando lote de {total} anúncios...")
         for index, anuncio in enumerate(anuncios, 1):
             try:
                 self.processar_anuncio(anuncio)
@@ -28,48 +28,41 @@ class CarEvaluator:
 
     def processar_anuncio(self, anuncio):
         # --- 1. DETECÇÃO DE REDUÇÃO DE PREÇO ---
-        # Verificamos se o anúncio já existe no banco e se o preço baixou
         preco_anterior = self.repository.obter_preco_anterior(anuncio.id_anuncio)
         
-        if preco_anterior > 0 and anuncio.preco < (preco_anterior - 100): # Margem de R$ 100 para evitar flutuação irrelevante
+        if preco_anterior > 0 and anuncio.preco < (preco_anterior - 100):
             reducao = preco_anterior - anuncio.preco
             percentual_queda = (reducao / preco_anterior) * 100
             
             logger.info(f"📉 QUEDA DE PREÇO: {anuncio.id_anuncio} baixou R$ {reducao:,.2f}")
-            
-            # Notifica a redução e atualiza o banco
             self._notificar_reducao_preco(anuncio, preco_anterior, percentual_queda)
             self.repository.atualizar_preco_anuncio(anuncio.id_anuncio, anuncio.preco)
             return
 
-        # --- 2. FILTRO DE DUPLICADOS PADRÃO ---
+        # --- 2. FILTRO DE DUPLICADOS ---
         if self.repository.anuncio_ja_processado(anuncio.id_anuncio):
             return
 
-        # --- 3. FILTROS DE SEGURANÇA E BLACKLIST ---
+        # --- 3. FILTROS DE SEGURANÇA (Blacklist) ---
         titulo_low = anuncio.titulo.lower()
-        for termo in self.BLACKLIST:
-            if termo in titulo_low:
-                logger.info(f"🚫 Blacklist: {anuncio.id_anuncio} ignorado por '{termo}'")
-                self.repository.salvar_anuncio_completo(anuncio, 0)
-                return
-
-        # --- 4. FILTROS DE KM E IDADE ---
-        km_limite = getattr(self.settings.filtros_globais, 'km_maximo_global', 100000)
-        if anuncio.km > km_limite:
-            self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
+        if any(termo in titulo_low for termo in self.BLACKLIST):
+            logger.info(f"🚫 Blacklist: {anuncio.id_anuncio} ignorado.")
+            self.repository.salvar_anuncio_completo(anuncio, 0)
             return
 
+        # --- 4. FILTROS DE KM E IDADE ---
         ano_atual = datetime.datetime.now().year
         idade_carro = max(1, ano_atual - anuncio.ano)
         km_por_ano = anuncio.km / idade_carro
         
-        limite_km_ano = getattr(self.settings.filtros_globais, 'km_ano_maximo', 15000)
-        if km_por_ano > limite_km_ano:
+        km_limite = getattr(self.settings.filtros_globais, 'km_maximo_global', 100000)
+        km_ano_limite = getattr(self.settings.filtros_globais, 'km_ano_maximo', 15000)
+
+        if anuncio.km > km_limite or km_por_ano > km_ano_limite:
             self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
             return
 
-        # --- 5. INFERIR MODELO E MARCA (Memória) ---
+        # --- 5. INFERIR MODELO E MARCA ---
         marca = self._inferir_marca(anuncio.titulo)
         modelo = self._inferir_modelo(anuncio.titulo)
         
@@ -88,34 +81,60 @@ class CarEvaluator:
         else:
             origem_fipe = "API"
             preco_fipe = self.repository.obter_preco_cache(marca, modelo, anuncio.ano)
-            
             if preco_fipe is None:
                 preco_fipe = self.fipe_client.consultar_preco_medio(marca, modelo, anuncio.ano)
                 if preco_fipe > 0:
                     self.repository.salvar_preco_cache(marca, modelo, anuncio.ano, preco_fipe)
 
-        # --- 7. AVALIAÇÃO FINAL E NOTIFICAÇÃO ---
-        if preco_fipe and preco_fipe > 0:
+        # --- 7. CÁLCULO DE SCORE E NOTIFICAÇÃO ---
+        if preco_fipe > 0:
             self.repository.salvar_anuncio_completo(anuncio, preco_fipe)
             
-            percentual = (anuncio.preco / preco_fipe) * 100
+            percentual_fipe = (anuncio.preco / preco_fipe) * 100
             alerta_max = self.settings.filtros_globais.fipe_oportunidade_ate_percentual
             
-            if percentual <= alerta_max:
-                logger.info(f"🎯 OPORTUNIDADE: {modelo} a {percentual:.1f}% da FIPE!")
-                self._notificar_oportunidade(anuncio, preco_fipe, percentual, km_por_ano, origem_fipe)
+            if percentual_fipe <= alerta_max:
+                score = self._calcular_score(anuncio, percentual_fipe, km_por_ano)
+                logger.info(f"🎯 OPORTUNIDADE: {modelo} Score {score}/100!")
+                self._notificar_oportunidade(anuncio, preco_fipe, percentual_fipe, km_por_ano, origem_fipe, score)
         else:
             self.repository.salvar_anuncio_completo(anuncio, 0)
 
-    # --- MÉTODOS DE NOTIFICAÇÃO (TELEGRAM) ---
+    # --- MOTOR DE SCORE (ALGORITMO V1.0) ---
 
-    def _notificar_oportunidade(self, anuncio, preco_fipe, percentual, km_por_ano, origem_fipe):
+    def _calcular_score(self, anuncio, percentual_fipe, km_por_ano):
+        """Calcula nota de 0 a 100 baseada em Preço (50%), Uso (30%) e Idade (20%)."""
+        score = 0
+        
+        # 1. Preço (Max 50 pts): 80% FIPE = 50 pts | 100% FIPE = 0 pts
+        score += max(0, (100 - percentual_fipe) * 2.5)
+
+        # 2. Uso (Max 30 pts): 7k km/ano = 30 pts | 17k km/ano = 0 pts
+        score += max(0, (17000 - km_por_ano) * 0.003 * 10)
+
+        # 3. Idade (Max 20 pts): Novo (0 anos) = 20 pts | Velho (10 anos) = 0 pts
+        idade = datetime.datetime.now().year - anuncio.ano
+        score += max(0, (10 - idade) * 2)
+
+        return round(min(100, score), 1)
+
+    def _obter_estrelas(self, score):
+        if score >= 90: return "⭐⭐⭐⭐⭐ (IMPERDÍVEL)"
+        if score >= 80: return "⭐⭐⭐⭐ (ÓTIMO)"
+        if score >= 70: return "⭐⭐⭐ (BOM)"
+        return "⭐⭐ (REGULAR)"
+
+    # --- MÉTODOS DE NOTIFICAÇÃO ---
+
+    def _notificar_oportunidade(self, anuncio, preco_fipe, percentual, km_por_ano, origem_fipe, score):
         titulo_seguro = html.escape(anuncio.titulo)
+        estrelas = self._obter_estrelas(score)
         tag = "💎 <i>(FIPE OLX)</i>" if origem_fipe == "OLX" else "🤖 <i>(FIPE API)</i>"
         
         msg = (
-            f"<b>🚀 NOVA OPORTUNIDADE!</b>\n\n"
-            f"🚗 <b>{titulo_seguro}</b>\n"
+            f"<b>🚀 {estrelas}</b>\n\n"
+            f"🏎️ <b>{titulo_seguro}</b>\n"
+            f"🏆 Score de Oportunidade: <b>{score}/100</b>\n\n"
             f"💰 Preço: <b>R$ {anuncio.preco:,.2f}</b>\n"
             f"📊 FIPE: R$ {preco_fipe:,.2f} ({percentual:.1f}%) {tag}\n"
             f"📅 Ano: {anuncio.ano} | 🛣️ KM: {anuncio.km:,}\n"
@@ -127,21 +146,20 @@ class CarEvaluator:
     def _notificar_reducao_preco(self, anuncio, preco_antigo, percentual_queda):
         titulo_seguro = html.escape(anuncio.titulo)
         msg = (
-            f"<b>📉 BAIXOU O PREÇO!</b>\n\n"
+            f"<b>📉 BAIXOU O PREÇO EM SALVADOR!</b>\n\n"
             f"🚗 <b>{titulo_seguro}</b>\n"
             f"❌ De: <strike>R$ {preco_antigo:,.2f}</strike>\n"
             f"✅ Por: <b>R$ {anuncio.preco:,.2f}</b>\n"
             f"🔥 Queda de: <b>R$ {preco_antigo - anuncio.preco:,.2f}</b> ({percentual_queda:.1f}%)\n\n"
-            f"🔗 <a href='{anuncio.link}'>Ver Oportunidade</a>"
+            f"🔗 <a href='{anuncio.link}'>Ver no OLX</a>"
         )
         self.notifier.enviar_alerta(msg)
 
     # --- AUXILIARES ---
 
     def _obter_limite_por_modelo(self, modelo_identificado: str) -> float:
-        modelo_key = modelo_identificado.lower()
         for v in getattr(self.settings, 'veiculos', []):
-            if v.modelo.lower() in modelo_key or modelo_key in v.modelo.lower():
+            if v.modelo.lower() in modelo_identificado.lower():
                 return float(v.preco_maximo)
         return float(getattr(self.settings.filtros_globais, 'preco_maximo', 95000))
 
