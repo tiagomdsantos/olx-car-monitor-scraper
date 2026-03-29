@@ -1,6 +1,7 @@
 # infrastructure/api/fipe_client.py
 import requests
 import logging
+import time
 from typing import Optional, List, Dict
 from core.interfaces import IFipeClient
 
@@ -8,55 +9,74 @@ logger = logging.getLogger(__name__)
 
 class ParallelumFipeClient(IFipeClient):
     """
-    Cliente FIPE robusto usando a API Parallelum.
-    Implementa busca em cascata: Marca -> Modelo -> Ano -> Valor.
+    Cliente FIPE com Rate Limiting para evitar erro 429.
+    Fluxo: Marca -> Modelo -> Ano -> Valor.
     """
     BASE_URL = "https://parallelum.com.br/fipe/api/v1/carros"
 
     def __init__(self):
         self._cache_marcas: List[Dict] = []
         self._cache_modelos: Dict[str, List[Dict]] = {}
-        # Header para evitar bloqueios e identificar a requisição
-        self._headers = {'User-Agent': 'MonitorOfertasOLX/1.0 (Python)'}
+        # User-Agent honesto ajuda a evitar bloqueios agressivos
+        self._headers = {'User-Agent': 'MonitorOfertasSalvador/1.0 (Python/Requests)'}
+
+    def _requisicao_segura(self, url: str, tentativas: int = 3) -> Optional[dict]:
+        """
+        Executa chamadas à API com delay de 1.5s e retry em caso de Erro 429.
+        """
+        for i in range(tentativas):
+            # Delay preventivo (Crucial para não ser bloqueado pela Parallelum)
+            time.sleep(1.5)
+            
+            try:
+                response = requests.get(url, headers=self._headers, timeout=12)
+                
+                if response.status_code == 429:
+                    espera = 35 * (i + 1) # Aumenta o tempo a cada erro
+                    logger.warning(f"⏳ Limite excedido (429). Aguardando {espera}s antes de tentar: {url}")
+                    time.sleep(espera)
+                    continue
+                
+                response.raise_for_status()
+                return response.json()
+            
+            except Exception as e:
+                logger.error(f"❌ Erro na chamada FIPE ({url}): {e}")
+                if i == tentativas - 1: return None
+        return None
 
     def _obter_codigo_marca(self, nome_marca: str) -> Optional[str]:
-        """Busca o código numérico da marca (ex: Toyota = 56)."""
         if not self._cache_marcas:
-            try:
-                response = requests.get(f"{self.BASE_URL}/marcas", headers=self._headers, timeout=10)
-                response.raise_for_status()
-                self._cache_marcas = response.json()
-            except Exception as e:
-                logger.error(f"❌ Erro ao buscar marcas FIPE: {e}")
+            dados = self._requisicao_segura(f"{self.BASE_URL}/marcas")
+            if dados:
+                self._cache_marcas = dados
+            else:
                 return None
         
-        nome_marca_clean = nome_marca.lower().strip()
+        nome_clean = nome_marca.lower().strip()
         for m in self._cache_marcas:
-            if nome_marca_clean in m['nome'].lower():
+            if nome_clean in m['nome'].lower():
                 return str(m['codigo'])
         return None
 
     def _obter_codigo_modelo(self, codigo_marca: str, nome_modelo: str) -> Optional[str]:
-        """Busca o código do modelo dentro de uma marca (ex: Corolla = 2500)."""
         if codigo_marca not in self._cache_modelos:
-            try:
-                url = f"{self.BASE_URL}/marcas/{codigo_marca}/modelos"
-                response = requests.get(url, headers=self._headers, timeout=10)
-                response.raise_for_status()
-                self._cache_modelos[codigo_marca] = response.json().get('modelos', [])
-            except Exception as e:
-                logger.error(f"❌ Erro ao buscar modelos para marca {codigo_marca}: {e}")
+            dados = self._requisicao_segura(f"{self.BASE_URL}/marcas/{codigo_marca}/modelos")
+            if dados:
+                # A API retorna um dicionário com a chave 'modelos'
+                self._cache_modelos[codigo_marca] = dados.get('modelos', [])
+            else:
                 return None
 
         nome_busca = nome_modelo.lower().strip()
         modelos = self._cache_modelos[codigo_marca]
-
-        # Tenta primeiro um match mais específico
+        
+        # Match exato primeiro
         for m in modelos:
             if nome_busca == m['nome'].lower():
                 return str(m['codigo'])
         
-        # Fallback: primeira ocorrência que contenha o nome (ex: "Corolla")
+        # Match parcial depois
         for m in modelos:
             if nome_busca in m['nome'].lower():
                 return str(m['codigo'])
@@ -65,61 +85,53 @@ class ParallelumFipeClient(IFipeClient):
 
     def consultar_preco_medio(self, marca: str, modelo: str, ano: int) -> float:
         """
-        Consulta o preço final baseado no ano específico do anúncio.
-        Lida com formatos de ano como '2023-1' (Gasolina) e '32000' (Zero KM).
+        Consulta o preço médio real na FIPE com tratamento de erros e delay.
         """
         try:
-            # 1. Obter Marca
+            # 1. Código da Marca
             cod_marca = self._obter_codigo_marca(marca)
-            if not cod_marca:
-                return 0.0
+            if not cod_marca: return 0.0
 
-            # 2. Obter Modelo
+            # 2. Código do Modelo
             cod_modelo = self._obter_codigo_modelo(cod_marca, modelo)
-            if not cod_modelo:
-                return 0.0
+            if not cod_modelo: return 0.0
 
-            # 3. Obter Anos disponíveis para este modelo
+            # 3. Código do Ano (ex: 2023 -> 2023-1)
             url_anos = f"{self.BASE_URL}/marcas/{cod_marca}/modelos/{cod_modelo}/anos"
-            res_anos = requests.get(url_anos, headers=self._headers, timeout=10)
-            res_anos.raise_for_status()
-            anos_disponiveis = res_anos.json()
+            lista_anos = self._requisicao_segura(url_anos)
+            if not lista_anos: return 0.0
 
-            # 4. Localizar o código do ano (ex: 2023 -> 2023-1)
             cod_ano = None
-            str_ano_buscado = str(ano)
-
-            for a in anos_disponiveis:
-                # Match exato do ano no início do código (2023-1, 2023-3, etc)
-                if a['codigo'].startswith(str_ano_buscado):
+            str_ano = str(ano)
+            for a in lista_anos:
+                if a['codigo'].startswith(str_ano):
                     cod_ano = a['codigo']
                     break
             
-            # Fallback para carros novos/Zero KM (Código 32000 na FIPE)
+            # Fallback para Zero KM
             if not cod_ano and ano >= 2025:
-                for a in anos_disponiveis:
+                for a in lista_anos:
                     if "32000" in a['codigo']:
                         cod_ano = a['codigo']
                         break
 
             if not cod_ano:
-                logger.warning(f"⚠️ Ano {ano} não encontrado para {marca} {modelo}. Disponíveis: {[a['codigo'] for a in anos_disponiveis]}")
+                logger.warning(f"⚠️ Ano {ano} não disponível para {marca} {modelo}")
                 return 0.0
 
-            # 5. Obter Preço Final
+            # 4. Preço Final
             url_valor = f"{self.BASE_URL}/marcas/{cod_marca}/modelos/{cod_modelo}/anos/{cod_ano}"
-            res_valor = requests.get(url_valor, headers=self._headers, timeout=10)
-            res_valor.raise_for_status()
-            dados_finais = res_valor.json()
+            dados_valor = self._requisicao_segura(url_valor)
+            if not dados_valor: return 0.0
 
-            # Limpeza do valor: "R$ 115.450,00" -> 115450.0
-            valor_str = dados_finais.get('Valor', '0')
+            # Limpeza do R$ e conversão
+            valor_str = dados_valor.get('Valor', '0')
             valor_limpo = valor_str.replace('R$', '').replace('.', '').replace(',', '.').replace(' ', '').strip()
             
             preco = float(valor_limpo)
-            logger.info(f"📊 FIPE Localizada: {marca} {modelo} ({ano}) -> R$ {preco:,.2f}")
+            logger.info(f"📊 FIPE Consultada: {marca} {modelo} ({ano}) -> R$ {preco:,.2f}")
             return preco
 
         except Exception as e:
-            logger.error(f"❌ Falha na consulta FIPE para {marca} {modelo} {ano}: {e}")
+            logger.error(f"❌ Erro fatal ao consultar FIPE: {e}")
             return 0.0
