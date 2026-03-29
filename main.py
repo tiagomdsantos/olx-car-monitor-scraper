@@ -15,7 +15,7 @@ from infrastructure.scrapers.olx_scraper import OLXPlaywrightScraper
 from core.evaluator import CarEvaluator
 from analisar_mercado import gerar_graficos_por_modelo
 
-# 1. Configuração de Ambiente e Logs
+# 1. Configuração de Logs
 load_dotenv()
 logging.basicConfig(
     level=logging.INFO, 
@@ -23,19 +23,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Locks e Eventos de Sincronização
+# Locks e Eventos Globais
 db_lock = threading.Lock()
 evento_scan_imediato = threading.Event()
 
 def thread_scraper(settings, repository, scraper, evaluator):
-    """Thread 1: Ciclo de busca (Wait-First) com persistência no banco."""
-    logger.info("🧵 Thread SCRAPER iniciada e monitorando...")
+    """Thread 1: Ciclo de busca persistente com inteligência de intervalo."""
+    logger.info("🧵 Thread SCRAPER ativa.")
     
     intervalo_min = settings.app.intervalo_scraping_minutos
 
     while True:
         try:
-            # Busca última execução no banco (Metadata)
+            # Recupera última execução do banco
             ultima_str = repository.ler_metadata("ultima_execucao")
             ultima = datetime.fromisoformat(ultima_str) if ultima_str else None
             
@@ -46,44 +46,40 @@ def thread_scraper(settings, repository, scraper, evaluator):
             else:
                 segundos_espera = 0
 
-            # Lógica de Espera Inteligente
             if segundos_espera > 0:
-                logger.info(f"⏳ Standby: Próximo ciclo em {int(segundos_espera/60)} min.")
+                logger.info(f"⏳ Standby: Próximo ciclo automático em {int(segundos_espera/60)} min.")
                 evento_scan_imediato.wait(timeout=segundos_espera)
             
-            # Reseta sinal se foi acordado por /scan
             evento_scan_imediato.clear()
 
-            logger.info("--- 🔄 EXECUTANDO VARREDURA OLX SALVADOR ---")
+            logger.info("--- 🔄 INICIANDO VARREDURA OLX SALVADOR ---")
             for local in settings.localizacoes:
                 for veiculo in settings.veiculos:
-                    marca, modelo = veiculo.marca, veiculo.modelo
-                    complemento = getattr(veiculo, 'complemento_busca', None)
-                    
-                    # Montagem de URL Robusta
-                    url_busca = f"https://www.olx.com.br/autos-e-pecas/carros-vans-e-utilitarios/{marca}/{modelo}"
-                    if complemento: url_busca += f"/{complemento}"
+                    url_busca = f"https://www.olx.com.br/autos-e-pecas/carros-vans-e-utilitarios/{veiculo.marca}/{veiculo.modelo}"
+                    if getattr(veiculo, 'complemento_busca', None):
+                        url_busca += f"/{veiculo.complemento_busca}"
                     url_busca += f"/estado-{local.estado}"
-                    if local.regiao != "todas": url_busca += f"/regiao-{local.regiao}"
+                    if local.regiao != "todas":
+                        url_busca += f"/regiao-{local.regiao}"
 
-                    logger.info(f"🔎 Analisando: {marca} {modelo}...")
+                    logger.info(f"🔎 Analisando: {veiculo.modelo}...")
                     
                     with db_lock:
                         anuncios = scraper.buscar_anuncios(url_busca)
                         if anuncios:
                             evaluator.avaliar_lista(anuncios)
 
-            # Salva sucesso no banco
+            # Salva sucesso no banco para o próximo restart
             repository.salvar_metadata("ultima_execucao", datetime.now().isoformat())
-            logger.info(f"✅ Ciclo finalizado com sucesso.")
+            logger.info(f"✅ Varredura concluída às {datetime.now().strftime('%H:%M')}")
 
         except Exception as e:
             logger.error(f"🔥 Erro na Thread Scraper: {e}")
             time.sleep(60)
 
 def thread_telegram_listener(settings, repository, notifier):
-    """Thread 2: Console de Comandos e Interface do Usuário."""
-    logger.info("🧵 Thread TELEGRAM iniciada e aguardando comandos...")
+    """Thread 2: Console de Comandos e Ajustes de Configuração."""
+    logger.info("🧵 Thread TELEGRAM ativa.")
     
     ultimo_update_id = 0
     token = settings.app.telegram_token
@@ -104,39 +100,32 @@ def thread_telegram_listener(settings, repository, notifier):
                     texto = msg_obj.get("text", "").lower().strip()
                     if str(msg_obj["chat"]["id"]) != chat_id_autorizado: continue
 
-                    # --- MENU CONSOLE STYLE ---
+                    # --- COMANDOS OPERACIONAIS ---
                     if texto in ["/help", "/start", "ajuda"]:
                         msg_help = (
-                            "<b>🏎️ MONITOR OLX SALVADOR v1.3.1</b>\n"
-                            "<i>Sua inteligência de mercado em tempo real</i>\n"
+                            "<b>🏎️ MONITOR OLX SALVADOR v1.5.0</b>\n"
                             "────────────────────────\n"
-                            "<b>💻 CONSOLE DE OPERAÇÃO:</b>\n\n"
-                            "🚀 /scan\n"
-                            "└─ <i>Força a varredura imediata na OLX.</i>\n\n"
-                            "📊 /grafico\n"
-                            "└─ <i>Mapa de calor (Top 10) por Score.</i>\n\n"
-                            "📈 /status\n"
-                            "└─ <i>Saúde do banco e tempo de espera.</i>\n\n"
-                            "❓ /help\n"
-                            "└─ <i>Exibe este console de ajuda.</i>\n"
+                            "🚀 /scan - Busca Imediata\n"
+                            "📊 /grafico - Mapa de Calor (Top 10)\n"
+                            "📈 /status - Saúde do Sistema\n"
+                            "⚙️ /config - Ajustar Pesos Score\n"
                             "────────────────────────\n"
-                            "🛰️ <b>Status:</b> <code>Online & Vigilante</code>\n"
-                            "🎯 <b>Filtro:</b> <code>FIPE &lt; 95% | Score &gt; 70</code>"
+                            "🛰️ <b>Status:</b> <code>Online & Vigilante</code>"
                         )
                         notifier.enviar_alerta(msg_help)
 
                     elif texto == "/scan":
-                        notifier.enviar_alerta("⚡ <b>Sinal enviado!</b> O scraper está sendo acordado...")
+                        notifier.enviar_alerta("⚡ <b>Sinal enviado!</b> Iniciando varredura...")
                         evento_scan_imediato.set()
 
                     elif texto == "/status":
                         ultima_str = repository.ler_metadata("ultima_execucao")
                         txt_ultima = datetime.fromisoformat(ultima_str).strftime('%H:%M:%S') if ultima_str else "Nunca"
                         
-                        # Cálculo de tempo restante
-                        intervalo = settings.app.intervalo_scraping_minutos
-                        proxima = (datetime.fromisoformat(ultima_str) + timedelta(minutes=intervalo)) if ultima_str else datetime.now()
-                        faltam = max(0, int((proxima - datetime.now()).total_seconds() / 60))
+                        # Pesos Atuais
+                        p_pre = repository.ler_metadata("peso_preco") or "50"
+                        p_km = repository.ler_metadata("peso_km") or "30"
+                        p_id = repository.ler_metadata("peso_idade") or "20"
 
                         with db_lock:
                             conn = sqlite3.connect(db_path_raw)
@@ -146,44 +135,62 @@ def thread_telegram_listener(settings, repository, notifier):
                         status_txt = (
                             f"<b>📊 STATUS DO TERMINAL</b>\n\n"
                             f"📦 Banco: <code>{total} anúncios</code>\n"
-                            f"🕒 Última Rodada: <code>{txt_ultima}</code>\n"
-                            f"⏳ Próximo Ciclo: <code>{faltam} minutos</code>\n"
-                            f"🛰️ Scanner: <code>Ativo</code>"
+                            f"🕒 Última: <code>{txt_ultima}</code>\n"
+                            f"⚙️ Pesos: <code>💰{p_pre}% | 🛣️{p_km}% | 📅{p_id}%</code>"
                         )
                         notifier.enviar_alerta(status_txt)
 
+                    # --- COMANDO DE CONFIGURAÇÃO REMOTA ---
+                    elif texto.startswith("/config"):
+                        parts = texto.split()
+                        if len(parts) == 4:
+                            try:
+                                p_pre, p_km, p_id = map(int, parts[1:])
+                                if sum([p_pre, p_km, p_id]) == 100:
+                                    repository.salvar_metadata("peso_preco", str(p_pre))
+                                    repository.salvar_metadata("peso_km", str(p_km))
+                                    repository.salvar_metadata("peso_idade", str(p_id))
+                                    
+                                    notifier.enviar_alerta(
+                                        f"⚙️ <b>Configuração Atualizada!</b>\n"
+                                        f"Pesos: Preço {p_pre}% | KM {p_km}% | Idade {p_id}%"
+                                    )
+                                else:
+                                    notifier.enviar_alerta("⚠️ <b>Erro:</b> A soma deve ser 100!")
+                            except:
+                                notifier.enviar_alerta("⚠️ <b>Erro:</b> Use números inteiros.")
+                        else:
+                            p_pre = repository.ler_metadata("peso_preco") or "50"
+                            p_km = repository.ler_metadata("peso_km") or "30"
+                            p_id = repository.ler_metadata("peso_idade") or "20"
+                            notifier.enviar_alerta(
+                                f"⚙️ <b>Pesos Atuais:</b>\n💰:{p_pre}% 🛣️:{p_km}% 📅:{p_id}%\n\n"
+                                f"Alterar: <code>/config [preço] [km] [idade]</code>"
+                            )
+
                     elif texto == "/grafico":
-                        notifier.enviar_alerta("📊 <b>Analisando dados...</b> Gerando mapa de calor.")
+                        notifier.enviar_alerta("📊 <b>Gerando análise...</b>")
                         with db_lock:
                             arquivos = gerar_graficos_por_modelo(db_path_raw)
-                        
-                        if not arquivos:
-                            notifier.enviar_alerta("⚠️ <b>Erro:</b> Dados insuficientes para análise.")
-                        else:
-                            for img in arquivos:
-                                if os.path.exists(img):
-                                    modelo_nome = img.split('_')[1].upper() if '_' in img else "GERAL"
-                                    notifier.enviar_grafico(img, f"📈 Oportunidades: {modelo_nome}")
-                                    os.remove(img)
-                            notifier.enviar_alerta("✅ <b>Dashboard enviado!</b>")
+                        for img in arquivos:
+                            if os.path.exists(img):
+                                notifier.enviar_grafico(img, "📈 <b>Mapa de Oportunidades</b>")
+                                os.remove(img)
 
         except Exception as e:
-            logger.error(f"❌ Erro na Interface Telegram: {e}")
+            logger.error(f"❌ Erro Interface: {e}")
             time.sleep(5)
 
 def main():
-    logger.info("🚀 SISTEMA INICIADO - MONITOR OLX v1.3.1")
+    logger.info("🚀 MONITOR OLX v1.5.0 INICIADO")
     try:
         settings = load_settings()
-        
-        # Injeção de Dependências
         repository = SQLiteRepository(settings.app.database_path)
         fipe_client = ParallelumFipeClient()
         notifier = TelegramNotifier(settings.app.telegram_token, settings.app.telegram_chat_id)
         scraper = OLXPlaywrightScraper(headless=True) 
         evaluator = CarEvaluator(settings, fipe_client, repository, notifier)
 
-        # Configuração das Threads (Ordem Corrigida)
         t1 = threading.Thread(target=thread_scraper, args=(settings, repository, scraper, evaluator), daemon=True)
         t2 = threading.Thread(target=thread_telegram_listener, args=(settings, repository, notifier), daemon=True)
 
@@ -194,9 +201,9 @@ def main():
             time.sleep(1)
 
     except KeyboardInterrupt:
-        logger.info("🛑 Encerrando Terminal...")
+        logger.info("🛑 Encerrando...")
     except Exception as e:
-        logger.error(f"💥 Falha Crítica: {e}")
+        logger.error(f"💥 Falha: {e}")
 
 if __name__ == "__main__":
     main()

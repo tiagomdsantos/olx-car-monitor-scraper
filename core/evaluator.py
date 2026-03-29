@@ -103,18 +103,23 @@ class CarEvaluator:
     # --- MOTOR DE SCORE (ALGORITMO V1.0) ---
 
     def _calcular_score(self, anuncio, percentual_fipe, km_por_ano):
-        """Calcula nota de 0 a 100 baseada em Preço (50%), Uso (30%) e Idade (20%)."""
+        # Busca pesos no banco ou usa o padrão (50, 30, 20)
+        p_preco = float(self.repository.ler_metadata("peso_preco") or 50)
+        p_km = float(self.repository.ler_metadata("peso_km") or 30)
+        p_idade = float(self.repository.ler_metadata("peso_idade") or 20)
+
         score = 0
         
-        # 1. Preço (Max 50 pts): 80% FIPE = 50 pts | 100% FIPE = 0 pts
-        score += max(0, (100 - percentual_fipe) * 2.5)
+        # 1. Componente Preço (Máximo = p_preco)
+        score += max(0, (100 - percentual_fipe) * (p_preco / 20))
 
-        # 2. Uso (Max 30 pts): 7k km/ano = 30 pts | 17k km/ano = 0 pts
-        score += max(0, (17000 - km_por_ano) * 0.003 * 10)
+        # 2. Componente Uso/KM (Máximo = p_km)
+        # 7k km/ano = full pts | 17k km/ano = 0 pts
+        score += max(0, (17000 - km_por_ano) * (p_km / 10000))
 
-        # 3. Idade (Max 20 pts): Novo (0 anos) = 20 pts | Velho (10 anos) = 0 pts
+        # 3. Componente Idade (Máximo = p_idade)
         idade = datetime.datetime.now().year - anuncio.ano
-        score += max(0, (10 - idade) * 2)
+        score += max(0, (10 - idade) * (p_idade / 10))
 
         return round(min(100, score), 1)
 
