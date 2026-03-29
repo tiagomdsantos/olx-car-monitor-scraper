@@ -29,9 +29,7 @@ class VeiculoConfig(BaseModel):
     complemento_busca: Optional[str] = None # Opcional, pois nem todos têm (ex: hatch)
     preco_maximo: float
     versoes_aceitas: List[str]
-
 class Settings:
-    """Transforma um dicionário em um objeto para acesso via ponto (settings.app.path)."""
     def __init__(self, adict):
         for key, value in adict.items():
             if isinstance(value, dict):
@@ -41,30 +39,31 @@ class Settings:
             setattr(self, key, value)
 
 def load_settings():
-    """Carrega o YAML e sobrescreve com as Variáveis de Ambiente."""
-    # Localiza o arquivo config.yaml na raiz do projeto
-    base_path = Path(__file__).parent.parent
-    camin_yaml = base_path / "config" / "config.yaml"
+    # Caminho do YAML
+    base_dir = Path(__file__).resolve().parent.parent
+    caminho_yaml = base_dir / "config" / "config.yaml"
     
-    if not camin_yaml.exists():
-        raise FileNotFoundError(f"Arquivo de configuração não encontrado em: {camin_yaml}")
+    # Se estiver no Docker, o volume monta aqui:
+    if not caminho_yaml.exists():
+        caminho_yaml = Path("/app/config/config.yaml")
 
-    with open(camin_yaml, "r", encoding="utf-8") as f:
+    with open(caminho_yaml, "r", encoding="utf-8") as f:
         config_dict = yaml.safe_load(f)
 
-    # 1. Prioridade para Variáveis de Ambiente (Docker/Compose)
-    token_env = os.getenv("TELEGRAM_TOKEN")
-    chat_id_env = os.getenv("TELEGRAM_CHAT_ID")
+    # 🛡️ INJEÇÃO OBRIGATÓRIA DAS CREDENCIAIS (Exclusivo via ENV)
+    token = os.getenv("TELEGRAM_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
-    if token_env:
-        config_dict['app']['telegram_token'] = token_env
-        print("✅ Usando TELEGRAM_TOKEN das variáveis de ambiente.")
-    
-    if chat_id_env:
-        config_dict['app']['telegram_chat_id'] = chat_id_env
-        print("✅ Usando TELEGRAM_CHAT_ID das variáveis de ambiente.")
+    if not token or not chat_id:
+        raise ValueError("❌ ERRO CRÍTICO: TELEGRAM_TOKEN ou TELEGRAM_CHAT_ID não definidos no ambiente/.env")
 
-    # 2. Retorna como objeto Settings para permitir acesso settings.app.xxx
+    # Garante que a estrutura 'app' existe no dict antes de injetar
+    if 'app' not in config_dict:
+        config_dict['app'] = {}
+        
+    config_dict['app']['telegram_token'] = token
+    config_dict['app']['telegram_chat_id'] = chat_id
+
     return Settings(config_dict)
 
 # Exemplo de uso rápido para teste local:

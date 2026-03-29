@@ -2,6 +2,7 @@
 import logging
 import html
 from core.models import Anuncio
+import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,24 @@ class CarEvaluator:
         if any(termo in titulo_low for termo in self.BLACKLIST):
             logger.info(f"🚫 Blacklist: {anuncio.id_anuncio} ignorado.")
             self.repository.salvar_anuncio_completo(anuncio, 0)
+            return# --- NOVO: Filtros de Quilometragem ---
+        
+        # A. KM Absoluto
+        km_limite = getattr(self.settings.filtros_globais, 'km_maximo_global', 100000)
+        if anuncio.km > km_limite:
+            logger.info(f"🛣️ KM Excessivo: {anuncio.km}km > Limite {km_limite}km")
+            self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
+            return
+
+        # B. Média KM/Ano (Desgaste relativo)
+        ano_atual = datetime.datetime.now().year
+        idade_carro = max(1, ano_atual - anuncio.ano) # Evita divisão por zero para carros do ano
+        km_por_ano = anuncio.km / idade_carro
+        
+        limite_km_ano = getattr(self.settings.filtros_globais, 'km_ano_maximo', 15000)
+        if km_por_ano > limite_km_ano:
+            logger.info(f"🏃 Carro muito rodado p/ o ano: {km_por_ano:.0f}km/ano (Limite: {limite_km_ano})")
+            self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
             return
 
         # 3. Identificação de Marca/Modelo e Filtro de Preço Específico
@@ -95,13 +114,18 @@ class CarEvaluator:
         return float(getattr(filtros, 'preco_maximo', 95000))
 
     def _notificar_telegram(self, anuncio, preco_fipe, percentual):
+        ano_atual = datetime.datetime.now().year
+        idade = max(1, ano_atual - anuncio.ano)
+        media_km = anuncio.km / idade
+        
         titulo_seguro = html.escape(anuncio.titulo)
         msg = (
             f"<b>🚀 OPORTUNIDADE EM SALVADOR!</b>\n\n"
             f"🚗 <b>{titulo_seguro}</b>\n"
             f"💰 Preço: <b>R$ {anuncio.preco:,.2f}</b>\n"
             f"📊 FIPE: R$ {preco_fipe:,.2f} ({percentual:.1f}%)\n"
-            f"📅 Ano: {anuncio.ano} | 🛣️ KM: {anuncio.km}\n\n"
+            f"📅 Ano: {anuncio.ano} | 🛣️ KM: {anuncio.km}\n"
+            f"📈 Média: <b>{media_km:.0f} km/ano</b>\n\n"
             f"🔗 <a href='{anuncio.link}'>Ver no OLX</a>"
         )
         self.notifier.enviar_alerta(msg)

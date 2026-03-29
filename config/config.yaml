@@ -2,8 +2,6 @@
 
 app:
   intervalo_scraping_minutos: 120
-  telegram_token: "SEU_TOKEN_AQUI"
-  telegram_chat_id: "SEU_CHAT_ID_AQUI"
   database_path: "data/anuncios.db"
 
 # Nova estrutura: Lista de locais para o robô varrer
@@ -17,6 +15,8 @@ filtros_globais:
   motor_minimo: "1.2"
   fipe_alerta_abaixo_de_percentual: 75
   fipe_oportunidade_ate_percentual: 95
+  km_maximo_global: 65000       # Não aceita nada acima disso
+  km_ano_maximo: 10000          # Média aceitável de rodagem por ano
 
 veiculos:
   - marca: "toyota"
