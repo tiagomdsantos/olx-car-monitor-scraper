@@ -3,6 +3,10 @@ import time
 import logging
 import traceback
 import os # Adicionado para criar a pasta data
+
+from dotenv import load_dotenv
+load_dotenv()
+
 from config.settings import load_settings
 from infrastructure.api.fipe_client import ParallelumFipeClient
 from infrastructure.database.sqlite_repo import SQLiteRepository

@@ -4,7 +4,7 @@
 # Variáveis de Configuração (DOCKER_USER agora vem do .env)
 IMAGE_NAME = monitor-olx-salvador
 DOCKER_USER ?= SEU-USUARIO# Valor padrão caso não esteja no .env
-VERSION = 1.1.0
+VERSION = 1.1.1
 FULL_IMAGE_NAME = $(DOCKER_USER)/$(IMAGE_NAME)
 
 .PHONY: help build up down logs restart status clean login push shell
