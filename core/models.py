@@ -1,6 +1,5 @@
 # core/models.py
 from dataclasses import dataclass
-from typing import Optional
 
 @dataclass
 class Anuncio:
@@ -10,7 +9,7 @@ class Anuncio:
     ano: int
     km: int
     link: str
-    marca: str
-    modelo: str
-    versao_identificada: Optional[str] = None
-    preco_fipe_estimado: Optional[float] = None
+    marca: str = ""
+    modelo: str = ""
+    categoria: str = ""  # <--- NOVA LINHA AQUI
+    preco_fipe_olx: float = 0.0

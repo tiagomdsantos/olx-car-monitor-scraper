@@ -1,16 +1,16 @@
 import logging
 import html
 import datetime
+import re
 
 logger = logging.getLogger(__name__)
 
 class CarEvaluator:
-    # Termos para ignorar anúncios problemáticos
     BLACKLIST = [
         "leilao", "leilão", "sinistro", "recuperado", "rs", "batido", 
         "consta", "finan", "agio", "ágio", "repasse", "pago pra ver", "venda de pecas"
     ]
-    # Mapeamento de termos proibidos com suas respectivas justificativas
+    
     BLACKLIST_DETALHADA = {
         "leilao": "Veículo proveniente de leilão (baixa liquidez/recusa de seguro)",
         "leilão": "Veículo proveniente de leilão (baixa liquidez/recusa de seguro)",
@@ -59,66 +59,98 @@ class CarEvaluator:
         if self.repository.anuncio_ja_processado(anuncio.id_anuncio):
             return
 
-        # --- 3. FILTROS DE SEGURANÇA (Blacklist) ---
+        # --- 3. FILTROS DE SEGURANÇA (Blacklist com Regex) ---
         titulo_low = anuncio.titulo.lower()
-        termo_encontrado = next((termo for termo in self.BLACKLIST_DETALHADA if termo in titulo_low), None)
+        termo_encontrado = next(
+            (termo for termo in self.BLACKLIST_DETALHADA if re.search(rf'\b{re.escape(termo)}\b', titulo_low)), 
+            None
+        )
         
         if termo_encontrado:
             motivo = self.BLACKLIST_DETALHADA[termo_encontrado]
-            logger.warning(f"🚫 BLACKLIST: {anuncio.id_anuncio} IGNORADO")
-            logger.warning(f"└─ Termo: '{termo_encontrado}'")
-            logger.warning(f"└─ Motivo: {motivo}")
-            
-            # Salvamos no banco com preco_fipe 0 para análise futura se necessário
-            self.repository.salvar_anuncio_completo(anuncio, 0)
+            logger.warning(f"🚫 BLACKLIST: {anuncio.id_anuncio} ({termo_encontrado})")
+            self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
             return
 
-        # --- 4. FILTROS DE KM E IDADE ---
+        # --- 4. INFERÊNCIA E BUSCA DA CONFIGURAÇÃO DO YAML ---
+        marca = self._inferir_marca(anuncio.titulo)
+        modelo_base = self._inferir_modelo_base(anuncio.titulo)
+        versao_anuncio = self._inferir_versao(anuncio.titulo)
+        modelo_completo = f"{modelo_base} {versao_anuncio}".strip()
+
+        # Localiza o carro específico no seu config.yaml
+        config_veiculo = next((v for v in self.settings.veiculos if v.modelo.lower() == modelo_base.lower()), None)
+
+        if config_veiculo:
+            # SANITY CHECK: Hatch vs Sedan
+            cat_yaml = getattr(config_veiculo, 'categoria', '').lower()
+            if cat_yaml == "hatch" and "sedan" in titulo_low:
+                logger.info(f"⏭️ [{anuncio.id_anuncio}] Ignorando Sedan (Alvo é Hatch): {anuncio.titulo}")
+                self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
+                return
+            if cat_yaml == "sedan" and "hatch" in titulo_low:
+                logger.info(f"⏭️ [{anuncio.id_anuncio}] Ignorando Hatch (Alvo é Sedan): {anuncio.titulo}")
+                self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
+                return
+
+            # FILTRO DE VERSÕES ACEITAS
+            versoes_aceitas = [str(v).lower() for v in getattr(config_veiculo, 'versoes_aceitas', [])]
+            if versoes_aceitas and "todas" not in versoes_aceitas:
+                if versao_anuncio.lower() not in versoes_aceitas:
+                    logger.info(f"⏭️ [{anuncio.id_anuncio}] Versão Indesejada ({versao_anuncio}): {anuncio.titulo}")
+                    self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
+                    return
+                    
+            # FILTRO DE PREÇO MÁXIMO DO MODELO
+            preco_max = getattr(config_veiculo, 'preco_maximo', self.settings.filtros_globais.preco_maximo)
+            if anuncio.preco > float(preco_max):
+                self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
+                return
+
+        # --- 5. FILTROS GLOBAIS (KM, Ano e Teto Orçamentário) ---
         ano_atual = datetime.datetime.now().year
         idade_carro = max(1, ano_atual - anuncio.ano)
         km_por_ano = anuncio.km / idade_carro
         
         km_limite = getattr(self.settings.filtros_globais, 'km_maximo_global', 100000)
-        km_ano_limite = getattr(self.settings.filtros_globais, 'km_ano_maximo', 15000)
+        km_ano_limite = getattr(self.settings.filtros_globais, 'km_ano_maximo', 16000)
+        ano_minimo = getattr(self.settings.filtros_globais, 'ano_minimo', 2010)
 
-        if anuncio.km > km_limite or km_por_ano > km_ano_limite:
+        if anuncio.km > km_limite or km_por_ano > km_ano_limite or anuncio.ano < ano_minimo:
             self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
             return
 
-        # --- 5. INFERIR MODELO E MARCA ---
-        marca = self._inferir_marca(anuncio.titulo)
-        modelo = self._inferir_modelo(anuncio.titulo)
-        
-        # Filtro de Preço Máximo por Modelo (Configurado no YAML)
-        limite_modelo = self._obter_limite_por_modelo(modelo)
-        if anuncio.preco > limite_modelo:
-            self.repository.salvar_anuncio_completo(anuncio, 0)
-            return
-
-        # --- 6. OBTENÇÃO DA FIPE (Prioridade OLX) ---
+        # --- 6. OBTENÇÃO DA FIPE ---
         preco_fipe = getattr(anuncio, 'preco_fipe_olx', 0.0)
         origem_fipe = "OLX"
         
         if preco_fipe > 0:
-            self.repository.salvar_preco_cache(marca, modelo, anuncio.ano, preco_fipe)
+            self.repository.salvar_preco_cache(marca, modelo_completo, anuncio.ano, preco_fipe)
         else:
             origem_fipe = "API"
-            preco_fipe = self.repository.obter_preco_cache(marca, modelo, anuncio.ano)
+            preco_fipe = self.repository.obter_preco_cache(marca, modelo_completo, anuncio.ano)
             if preco_fipe is None:
-                preco_fipe = self.fipe_client.consultar_preco_medio(marca, modelo, anuncio.ano)
+                preco_fipe = self.fipe_client.consultar_preco_medio(marca, modelo_completo, anuncio.ano)
                 if preco_fipe > 0:
-                    self.repository.salvar_preco_cache(marca, modelo, anuncio.ano, preco_fipe)
+                    self.repository.salvar_preco_cache(marca, modelo_completo, anuncio.ano, preco_fipe)
 
         # --- 7. CÁLCULO DE SCORE E NOTIFICAÇÃO ---
         if preco_fipe > 0:
             self.repository.salvar_anuncio_completo(anuncio, preco_fipe)
             
             percentual_fipe = (anuncio.preco / preco_fipe) * 100
-            alerta_max = self.settings.filtros_globais.fipe_oportunidade_ate_percentual
+            alerta_max = getattr(self.settings.filtros_globais, 'fipe_oportunidade_ate_percentual', 95)
+            alerta_min = getattr(self.settings.filtros_globais, 'fipe_alerta_abaixo_de_percentual', 65)
             
+            # --- NOVO: FILTRO ANTI-GOLPE (Limiar Mínimo) ---
+            if percentual_fipe < alerta_min:
+                logger.warning(f"🚨 [{anuncio.id_anuncio}] POSSÍVEL GOLPE: {anuncio.titulo} a {percentual_fipe:.1f}% da FIPE (Abaixo de {alerta_min}%). Ignorado.")
+                self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
+                return
+
             if percentual_fipe <= alerta_max:
                 score = self._calcular_score(anuncio, percentual_fipe, km_por_ano)
-                logger.info(f"🎯 OPORTUNIDADE: {modelo} Score {score}/100!")
+                logger.info(f"🎯 OPORTUNIDADE: {modelo_completo} Score {score}/100!")
                 self._notificar_oportunidade(anuncio, preco_fipe, percentual_fipe, km_por_ano, origem_fipe, score)
         else:
             self.repository.salvar_anuncio_completo(anuncio, 0)
@@ -126,21 +158,14 @@ class CarEvaluator:
     # --- MOTOR DE SCORE (ALGORITMO V1.0) ---
 
     def _calcular_score(self, anuncio, percentual_fipe, km_por_ano):
-        # Busca pesos no banco ou usa o padrão (50, 30, 20)
         p_preco = float(self.repository.ler_metadata("peso_preco") or 50)
         p_km = float(self.repository.ler_metadata("peso_km") or 30)
         p_idade = float(self.repository.ler_metadata("peso_idade") or 20)
 
         score = 0
-        
-        # 1. Componente Preço (Máximo = p_preco)
         score += max(0, (100 - percentual_fipe) * (p_preco / 20))
-
-        # 2. Componente Uso/KM (Máximo = p_km)
-        # 7k km/ano = full pts | 17k km/ano = 0 pts
         score += max(0, (17000 - km_por_ano) * (p_km / 10000))
-
-        # 3. Componente Idade (Máximo = p_idade)
+        
         idade = datetime.datetime.now().year - anuncio.ano
         score += max(0, (10 - idade) * (p_idade / 10))
 
@@ -157,16 +182,16 @@ class CarEvaluator:
     def _notificar_oportunidade(self, anuncio, preco_fipe, percentual, km_por_ano, origem_fipe, score):
         titulo_seguro = html.escape(anuncio.titulo)
         estrelas = self._obter_estrelas(score)
-        tag = "💎 <i>(FIPE OLX)</i>" if origem_fipe == "OLX" else "🤖 <i>(FIPE API)</i>"
+        tag = "💎 <i>(OLX)</i>" if origem_fipe == "OLX" else "🤖 <i>(FIPE)</i>"
         
         msg = (
             f"<b>🚀 {estrelas}</b>\n\n"
             f"🏎️ <b>{titulo_seguro}</b>\n"
-            f"🏆 Score de Oportunidade: <b>{score}/100</b>\n\n"
+            f"🏆 Score: <b>{score}/100</b>\n\n"
             f"💰 Preço: <b>R$ {anuncio.preco:,.2f}</b>\n"
             f"📊 FIPE: R$ {preco_fipe:,.2f} ({percentual:.1f}%) {tag}\n"
             f"📅 Ano: {anuncio.ano} | 🛣️ KM: {anuncio.km:,}\n"
-            f"📈 Média: <b>{km_por_ano:.0f} km/ano</b>\n\n"
+            f"📈 Média de Uso: <b>{km_por_ano:.0f} km/ano</b>\n\n"
             f"🔗 <a href='{anuncio.link}'>Abrir no OLX</a>"
         )
         self.notifier.enviar_alerta(msg)
@@ -178,18 +203,12 @@ class CarEvaluator:
             f"🚗 <b>{titulo_seguro}</b>\n"
             f"❌ De: <strike>R$ {preco_antigo:,.2f}</strike>\n"
             f"✅ Por: <b>R$ {anuncio.preco:,.2f}</b>\n"
-            f"🔥 Queda de: <b>R$ {preco_antigo - anuncio.preco:,.2f}</b> ({percentual_queda:.1f}%)\n\n"
+            f"🔥 Queda: <b>R$ {preco_antigo - anuncio.preco:,.2f}</b> ({percentual_queda:.1f}%)\n\n"
             f"🔗 <a href='{anuncio.link}'>Ver no OLX</a>"
         )
         self.notifier.enviar_alerta(msg)
 
     # --- AUXILIARES ---
-
-    def _obter_limite_por_modelo(self, modelo_identificado: str) -> float:
-        for v in getattr(self.settings, 'veiculos', []):
-            if v.modelo.lower() in modelo_identificado.lower():
-                return float(v.preco_maximo)
-        return float(getattr(self.settings.filtros_globais, 'preco_maximo', 95000))
 
     def _inferir_marca(self, texto: str) -> str:
         t = texto.lower()
@@ -198,7 +217,7 @@ class CarEvaluator:
             if k in t: return v
         return "Desconhecida"
 
-    def _inferir_modelo(self, texto: str) -> str:
+    def _inferir_modelo_base(self, texto: str) -> str:
         t = texto.lower()
         modelos_alvo = ["corolla cross", "corolla", "city", "wr-v", "hr-v", "kicks", "sentra", "versa", "yaris", "hb20", "creta"]
         for m in modelos_alvo:
@@ -206,20 +225,10 @@ class CarEvaluator:
         return texto.split()[0].capitalize() if texto.split() else "Outros"
 
     def _inferir_versao(self, titulo):
-        """Identifica a versão específica do carro para uma FIPE mais precisa."""
-        t = titulo.lower()
-        # Mapeamento de versões por relevância
-        versoes = [
-            "xei", "altis", "gli", "dynamic", "gr-sport", # Corolla
-            "exl", "touring", "lx", "ex", "dx",            # Honda (Civic/City/Fit)
-            "advance", "exclusive", "sense", "sv", "sl"     # Nissan Kicks
-        ]
-        for v in versoes:
-            if v in t:
-                return v.upper()
-        return "" # Se não achar, mantém vazio para busca genérica
-
-    def _inferir_modelo_completo(self, titulo):
-        modelo = self._inferir_modelo(titulo)
-        versao = self._inferir_versao(titulo)
-        return f"{modelo} {versao}".strip()
+        """Usa tokens para extrair versões exatas do título do anúncio."""
+        t = str(titulo).lower().replace('-', ' ').replace('.', ' ')
+        tokens = t.split()
+        versoes_alvo = ["xls", "xs", "xl", "xei", "altis", "gli", "gr-sport", "exclusive", "advance", "sense", "exl", "touring", "ex", "lx", "sv", "sl"]
+        for v in versoes_alvo:
+            if v in tokens: return v.upper()
+        return ""

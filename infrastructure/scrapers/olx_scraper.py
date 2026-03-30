@@ -1,4 +1,3 @@
-# infrastructure/scrapers/olx_scraper.py
 import re
 import logging
 from typing import List
@@ -14,89 +13,118 @@ class OLXPlaywrightScraper(IScraper):
     def __init__(self, headless: bool = True):
         self.headless = headless
 
-    def buscar_anuncios(self, url: str) -> List[Anuncio]:
-        html_content = ""
+    def buscar_anuncios(self, url_base: str, max_paginas: int = 5) -> List[Anuncio]:
+        """
+        Navega por múltiplas páginas da OLX para superar o limite de 50 anúncios.
+        max_paginas = 5 significa que ele vai buscar até 250 anúncios por modelo.
+        """
+        anuncios_totais = []
+        
         try:
             with sync_playwright() as p:
-                # Lançamos o navegador normalmente
                 browser = p.chromium.launch(headless=self.headless)
-                
-                # Criamos o contexto com User-Agent humano e desativamos o webdriver
                 context = browser.new_context(
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                     extra_http_headers={"Accept-Language": "pt-BR,pt;q=0.9"}
                 )
-                
                 page = context.new_page()
 
-                # TRUQUE: Remove a flag "navigator.webdriver" que sites usam para detectar bots
+                # TRUQUE: Anti-bot
                 page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-                logger.info(f"🌐 Acessando OLX: {url}")
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                
-                # Espera o carregamento dinâmico
-                page.wait_for_timeout(5000)
-                
-                # Scroll para garantir que a OLX renderize os cards
-                page.evaluate("window.scrollTo(0, 1200)")
-                page.wait_for_timeout(2000)
-                
-                html_content = page.content()
-                
-                # Salva debug para análise se necessário
-                with open("debug_olx.html", "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                
+                # --- LOOP DE PAGINAÇÃO ---
+                for pagina_atual in range(1, max_paginas + 1):
+                    # A OLX usa ?o=1, ?o=2, etc para paginação
+                    url_pagina = f"{url_base}?o={pagina_atual}"
+                    
+                    logger.info(f"🌐 Acessando OLX (Página {pagina_atual}/{max_paginas}): {url_pagina}")
+                    
+                    page.goto(url_pagina, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(4000) # Tempo para os scripts da OLX carregarem
+                    
+                    # Scroll até o fim para garantir que o JSON carregue tudo
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(2000)
+                    
+                    html_content = page.content()
+                    anuncios_da_pagina = self._parse_html(html_content, url_pagina)
+                    
+                    # Se a página não trouxe anúncios, significa que chegamos ao fim da lista real
+                    if not anuncios_da_pagina:
+                        logger.info(f"🏁 Fim da lista alcançado na página {pagina_atual}. Nenhuma oferta nova.")
+                        break
+                        
+                    anuncios_totais.extend(anuncios_da_pagina)
+
                 browser.close()
                 
         except Exception as e:
-            logger.error(f"❌ Erro no Playwright: {e}")
-            return []
+            logger.error(f"❌ Erro no Playwright durante a paginação: {e}")
 
-        return self._parse_html(html_content, url)
+        # Remove duplicatas absolutas (A OLX costuma repetir anúncios patrocinados entre páginas)
+        lista_final = list({a.id_anuncio: a for a in anuncios_totais}.values())
+        logger.info(f"📦 Total extraído após paginação: {len(lista_final)} anúncios únicos.")
+        return lista_final
         
-
     def _parse_html(self, html: str, url_origem: str) -> List[Anuncio]:
         soup = BeautifulSoup(html, 'html.parser')
         anuncios_encontrados = []
 
-        # 1. Busca o script JSON que contém todos os dados da página
         script_tag = soup.find('script', id='__NEXT_DATA__')
         
         if not script_tag:
-            logger.warning("⚠️ Não foi possível encontrar o JSON de dados da OLX (__NEXT_DATA__).")
+            logger.warning("⚠️ Não foi possível encontrar o JSON de dados da página.")
             return []
 
         try:
             dados = json.loads(script_tag.string)
-            # A estrutura da OLX é profunda: props -> pageProps -> ads
             ads = dados.get('props', {}).get('pageProps', {}).get('ads', [])
             
-            logger.info(f"📊 JSON extraído: {len(ads)} anúncios brutos encontrados.")
-
             for ad in ads:
-                # Extraímos os dados diretamente do dicionário JSON
                 id_anuncio = ad.get('listId')
                 titulo = ad.get('subject', 'Sem título')
+                descricao = ad.get('body', '')  
                 link = ad.get('url')
                 
-                # Preço: remove caracteres não numéricos
                 preco_raw = str(ad.get('price', '0')).replace('R$', '').replace('.', '').replace(' ', '').strip()
                 preco = float(preco_raw) if preco_raw.isdigit() else 0.0
                 
-                # Mapeia as propriedades (Ano e KM)
                 properties = {p.get('name'): p.get('value') for p in ad.get('properties', [])}
                 
-                # Ano: Tenta pegar de 'vehicle_year' ou 'regdate'
                 ano_val = properties.get('vehicle_year', properties.get('regdate', 0))
                 ano = int(ano_val) if str(ano_val).isdigit() else 0
                 
-                # KM: CORREÇÃO DA VARIÁVEL AQUI
                 km_val = str(properties.get('mileage', '0')).replace('.', '').replace(' ', '')
                 km = int(km_val) if km_val.isdigit() else 0
 
-                # Filtro de segurança e integridade
+                marca_olx = properties.get('vehicle_brand', '')
+                modelo_olx = properties.get('vehicle_model', '')
+                
+                # --- SISTEMA DE TRIAGEM DE CATEGORIA ---
+                categoria_olx = ""
+                
+                # TIER 1: Oficial
+                cartype_raw = str(properties.get('cartype', '')).lower()
+                if 'sed' in cartype_raw: categoria_olx = 'sedan'
+                elif 'hatch' in cartype_raw: categoria_olx = 'hatch'
+                elif 'suv' in cartype_raw or 'utilitário' in cartype_raw: categoria_olx = 'suv'
+
+                # TIER 2: Título
+                if not categoria_olx:
+                    titulo_low = titulo.lower()
+                    if re.search(r'\b(sedan|sedã|seda)\b', titulo_low): categoria_olx = 'sedan'
+                    elif re.search(r'\b(hatch|hatchback)\b', titulo_low): categoria_olx = 'hatch'
+                    elif re.search(r'\b(suv|utilitário|utilitario)\b', titulo_low): categoria_olx = 'suv'
+
+                # TIER 3: Descrição
+                if not categoria_olx:
+                    descricao_low = descricao.lower()
+                    if re.search(r'\b(sedan|sedã|seda)\b', descricao_low): categoria_olx = 'sedan'
+                    elif re.search(r'\b(hatch|hatchback)\b', descricao_low): categoria_olx = 'hatch'
+                    elif re.search(r'\b(suv|utilitário|utilitario)\b', descricao_low): categoria_olx = 'suv'
+                    else: categoria_olx = 'outros'
+
+                # Filtro de Sanidade
                 if preco > 5000 and ano >= 2010:
                     anuncios_encontrados.append(Anuncio(
                         id_anuncio=str(id_anuncio),
@@ -105,12 +133,13 @@ class OLXPlaywrightScraper(IScraper):
                         ano=ano,
                         km=km,
                         link=link,
-                        marca="", modelo=""
+                        marca=marca_olx.capitalize(), 
+                        modelo=modelo_olx.capitalize(),
+                        categoria=categoria_olx
                     ))
 
         except Exception as e:
-            logger.error(f"❌ Erro ao processar o JSON da OLX: {e}")
+            logger.error(f"❌ Erro ao processar o JSON: {e}")
 
-        lista_final = list({a.id_anuncio: a for a in anuncios_encontrados}.values())
-        logger.info(f"✅ Sucesso: {len(lista_final)} anúncios processados via JSON.")
-        return lista_final
+        # Retorna apenas os únicos daquela página
+        return list({a.id_anuncio: a for a in anuncios_encontrados}.values())

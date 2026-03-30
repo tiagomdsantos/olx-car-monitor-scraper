@@ -9,13 +9,13 @@ from config.settings import load_settings
 # Configuração de Logs
 logger = logging.getLogger(__name__)
 
-# --- MOTORES DE INFERÊNCIA E CÁLCULO ---
+# --- 1. MOTORES DE INFERÊNCIA E CÁLCULO ---
 
 def identificar_versao_precisa(titulo):
-    """Extrai a versão (XLS, XS, XEi, etc) usando tokens para evitar falso-positivo."""
+    """Extrai a versão (XLS, XS, XEi, etc) usando tokens para precisão."""
     t = str(titulo).lower().replace('-', ' ').replace('.', ' ')
     tokens = t.split()
-    versoes_alvo = ["xls", "xs", "xl", "xei", "altis", "gli", "gr-sport", "exclusive", "advance", "sense", "exl", "touring", "ex", "lx"]
+    versoes_alvo = ["xls", "xs", "xl", "xei", "altis", "gli", "gr-sport", "exclusive", "advance", "sense", "exl", "touring", "ex", "lx", "sv", "sl"]
     for v in versoes_alvo:
         if v in tokens: return v.upper()
     return ""
@@ -27,7 +27,7 @@ def calcular_score_tecnico(row):
     score = 0
     # A) Preço vs FIPE (50%)
     score += max(0, (100 - row['percentual_fipe']) * 2.5)
-    # B) KM/Uso (30%)
+    # B) KM/Uso (30%) - Referência de 17k km/ano como limite tolerável
     idade = max(1, datetime.now().year - row['ano'])
     km_ano = row['km'] / idade
     score += max(0, (17000 - km_ano) * 0.003 * 10)
@@ -36,24 +36,25 @@ def calcular_score_tecnico(row):
     return round(min(100, score), 1)
 
 def calcular_elite_score(row):
-    """Critério de desempate para o ranking final (Bônus de conservação)."""
+    """Ranking final: Bônus para conservação."""
     base = row['score'] if pd.notnull(row['score']) else 50.0
     elite = base
     idade = max(1, datetime.now().year - row['ano'])
-    # Bônus Carro Novo (<= 3 anos) em Salvador
+    
+    # Bônus: Carro Novo (<= 3 anos)
     if idade <= 3: elite += 6
-    # Bônus Baixa KM (< 10k km/ano)
+    # Bônus: Baixa KM (< 10k km/ano)
     if (row['km'] / idade) < 10000: elite += 8
-    # Penalidade por termos de risco
+    # Penalidade: Termos de risco no título
     t = str(row['titulo']).lower()
     if any(x in t for x in ["urgente", "repasse", "detalhes", "detalhe"]): elite -= 12
+    
     return round(elite, 1)
 
-# --- FUNÇÃO DE PLOTAGEM COLORIDA ---
+# --- 2. MOTOR DE PLOTAGEM VISUAL ---
 
 def plotar_ranking_colorido(dataframe, title, filename):
-    """Gera o gráfico com escala de cores vibrante RdYlGn."""
-    # Seleciona Top 10 pelo Score Técnico e ordena pelo Elite para o ranking
+    """Gera o dashboard de dispersão com mapa de calor RdYlGn."""
     top_10 = dataframe.sort_values(by='score', ascending=False).head(10).copy()
     top_10 = top_10.sort_values(by='elite_score', ascending=False)
     
@@ -61,18 +62,12 @@ def plotar_ranking_colorido(dataframe, title, filename):
 
     plt.figure(figsize=(12, 8))
     
-    # RESTAURAÇÃO DO MAPA DE CALOR: Vermelho (Ruim) -> Amarelo -> Verde (Bom)
+    # Mapa de Calor: Vermelho (<=60) para Verde Escuro (>=95)
     scatter = plt.scatter(
-        top_10['km'], 
-        top_10['preco_anuncio'], 
-        c=top_10['elite_score'], 
-        cmap='RdYlGn', 
-        s=380, 
-        edgecolors='black', 
-        linewidths=1.2,
-        alpha=0.9, 
-        vmin=60,  # Score 60 para baixo = Vermelho
-        vmax=95   # Score 95 para cima = Verde Escuro
+        top_10['km'], top_10['preco_anuncio'], 
+        c=top_10['elite_score'], cmap='RdYlGn', 
+        s=380, edgecolors='black', linewidths=1.2,
+        alpha=0.9, vmin=60, vmax=95
     )
 
     for i, (idx, row) in enumerate(top_10.iterrows()):
@@ -94,111 +89,164 @@ def plotar_ranking_colorido(dataframe, title, filename):
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'R${x:,.0f}'))
     
-    # Adiciona a barra de cores lateral
     cbar = plt.colorbar(scatter)
-    cbar.set_label('Qualidade da Oportunidade (Elite Score)', rotation=270, labelpad=20)
+    cbar.set_label('Decisão de Compra (Elite Score)', rotation=270, labelpad=20)
 
     plt.tight_layout()
-    nome_final = f"{filename}_{datetime.now().strftime('%H%M')}.png"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    nome_final = f"{filename}_{timestamp}.png"
     plt.savefig(nome_final, dpi=140)
     plt.close()
     return nome_final
 
-# --- FUNÇÕES DE INTERFACE ---
+# --- 3. FUNÇÕES PRINCIPAIS DE INTEGRAÇÃO ---
 
-def gerar_graficos_por_modelo(db_path="data/anuncios.db"):
-    """Lê o banco, aplica filtros do YAML e gera os PNGs coloridos."""
-    settings = load_settings()
-    if not os.path.exists(db_path): return []
-
+def preparar_dataframe(db_path, settings):
+    """Lê o banco, respeita a categoria extraída pela OLX e cruza com o YAML."""
     try:
         conn = sqlite3.connect(db_path)
         query = "SELECT * FROM anuncios_detalhados WHERE preco_anuncio > 5000 AND km >= 0"
-        df_bruto = pd.read_sql_query(query, conn)
+        df = pd.read_sql_query(query, conn)
         conn.close()
     except Exception as e:
         logger.error(f"❌ Erro SQL: {e}")
-        return []
+        return pd.DataFrame()
 
-    if df_bruto.empty: return []
+    if df.empty: return df
 
-    # Inferência baseada nos modelos do YAML
-    modelos_config = {v.modelo.lower(): v.modelo.capitalize() for v in settings.veiculos}
+    # Garante que a coluna existe para não quebrar com bancos antigos
+    if 'categoria' not in df.columns:
+        df['categoria'] = 'outros'
+
+    # Mapeamento do YAML
+    config_map = {
+        v.modelo.lower(): {
+            "nome": v.modelo.capitalize(), 
+            "cat_yaml": getattr(v, 'categoria', '').lower()
+        } for v in settings.veiculos
+    }
+
+    def processar_linha(row):
+        t = str(row['titulo']).lower()
+        cat_db = str(row.get('categoria', '')).lower() # Categoria oficial que o Scraper salvou
+
+        for slug, info in config_map.items():
+            if slug in t:
+                cat_yaml = info["cat_yaml"]
+
+                # --- 1. FONTE DE VERDADE: BANCO DE DADOS (OLX) ---
+                if cat_db in ['hatch', 'sedan', 'suv', 'hatchback']:
+                    cat_db_norm = 'hatch' if 'hatch' in cat_db else cat_db
+                    
+                    # Se o YAML exige um, mas o Banco diz outro: REJEITA
+                    if cat_yaml and cat_yaml != 'geral' and cat_db_norm != cat_yaml:
+                        return pd.Series([None, None]) 
+                    
+                    return pd.Series([info["nome"], cat_db_norm.capitalize()])
+
+                # --- 2. FALLBACK PARA ANÚNCIOS ANTIGOS (Sem info no banco) ---
+                if cat_yaml == "hatch" and "sedan" in t:
+                    return pd.Series([None, None]) 
+                if cat_yaml == "sedan" and "hatch" in t:
+                    return pd.Series([None, None])
+                
+                return pd.Series([info["nome"], cat_yaml.capitalize() if cat_yaml else "Outros"])
+                
+        return pd.Series(["Outros", "Outros"])
+
+    # Aplica a função linha a linha (axis=1) para ler título e categoria do banco simultaneamente
+    df[['modelo_ref', 'categoria_final']] = df.apply(processar_linha, axis=1)
     
-    def inferir_mod(titulo):
-        t = str(titulo).lower()
-        for slug, nome in modelos_config.items():
-            if slug in t: return nome
-        return "Outros"
+    # Remove sumariamente os anúncios que deram conflito (Os que retornaram None)
+    df = df.dropna(subset=['modelo_ref'])
+    
+    # Atualiza a coluna de categoria para a versão validada
+    df['categoria'] = df['categoria_final']
 
-    df_bruto['modelo_ref'] = df_bruto['titulo'].apply(inferir_mod)
-    df_bruto['versao'] = df_bruto['titulo'].apply(identificar_versao_precisa)
-    df_bruto['score'] = df_bruto.apply(calcular_score_tecnico, axis=1)
-    df_bruto['elite_score'] = df_bruto.apply(calcular_elite_score, axis=1)
+    df['versao'] = df['titulo'].apply(identificar_versao_precisa)
+    df['score'] = df.apply(calcular_score_tecnico, axis=1)
+    df['elite_score'] = df.apply(calcular_elite_score, axis=1)
 
-    # Filtragem por Preferência do Tiago
-    df_final = pd.DataFrame()
+    # Filtragem YAML (Preço e Regras de Negócio)
+    df_filtrado = pd.DataFrame()
     for v_config in settings.veiculos:
         nome_mod = v_config.modelo.capitalize()
-        temp = df_bruto[df_bruto['modelo_ref'] == nome_mod].copy()
+        temp = df[df['modelo_ref'] == nome_mod].copy()
+        
+        # Filtro de Preço Máximo
         if hasattr(v_config, 'preco_maximo'):
             temp = temp[temp['preco_anuncio'] <= v_config.preco_maximo]
+        
+        # Regra DURA do Yaris
         if nome_mod == "Yaris":
             temp = temp[temp['versao'].isin(['XS', 'XLS'])]
-        df_final = pd.concat([df_final, temp])
+            
+        df_filtrado = pd.concat([df_filtrado, temp])
 
-    if df_final.empty: return []
+    return df_filtrado
+
+def gerar_graficos_por_modelo(db_path="data/anuncios.db"):
+    """Gera todos os relatórios visuais baseados na configuração."""
+    settings = load_settings()
+    if not os.path.exists(db_path): return []
+
+    df = preparar_dataframe(db_path, settings)
+    if df.empty: return []
 
     arquivos = []
-    # 1. Gráfico Geral
-    arq_geral = plotar_ranking_colorido(df_final, "TOP 10 GERAL: Ranking de Decisão (Salvador)", "ranking_elite_geral")
+    
+    # 1. Gráfico Top 10 Geral
+    arq_geral = plotar_ranking_colorido(df, "TOP 10 GERAL: Oportunidades em Salvador", "ranking_geral")
     if arq_geral: arquivos.append(arq_geral)
 
-    # 2. Gráficos por Modelo
-    for mod in df_final['modelo_ref'].unique():
+    # 2. Gráficos por Categoria (Sedan, Hatch, SUV)
+    for cat in df['categoria'].unique():
+        if cat == "Outros": continue
+        arq_cat = plotar_ranking_colorido(
+            df[df['categoria'] == cat], 
+            f"ELITE RANK: Melhores {cat.upper()}S em Salvador", 
+            f"ranking_cat_{cat.lower()}"
+        )
+        if arq_cat: arquivos.append(arq_cat)
+
+    # 3. Gráficos por Modelo Específico
+    for mod in df['modelo_ref'].unique():
         if mod == "Outros": continue
-        arq_mod = plotar_ranking_colorido(df_final[df_final['modelo_ref'] == mod], f"ELITE RANK: Melhores {mod.upper()} em Salvador", f"elite_{mod.lower()}")
+        arq_mod = plotar_ranking_colorido(
+            df[df['modelo_ref'] == mod], 
+            f"ELITE RANK: Mercado {mod.upper()} (Salvador)", 
+            f"ranking_mod_{mod.lower()}"
+        )
         if arq_mod: arquivos.append(arq_mod)
 
     return arquivos
 
-def obter_texto_elite(db_path="data/anuncios.db", modelo_alvo=None):
-    """Gera o ranking textual com links para o comando /top."""
+def obter_texto_elite(db_path="data/anuncios.db", alvo=None):
+    """Gera o ranking textual, aceitando Busca Geral, por Categoria ou por Modelo."""
     settings = load_settings()
-    try:
-        conn = sqlite3.connect(db_path)
-        df = pd.read_sql_query("SELECT * FROM anuncios_detalhados WHERE preco_anuncio > 5000", conn)
-        conn.close()
+    df = preparar_dataframe(db_path, settings)
+    
+    if df.empty: return "📭 Nenhum anúncio passou pelos filtros (YAML/Versão)."
+
+    # Se um alvo foi passado via Telegram (ex: /top sedan ou /top corolla)
+    if alvo:
+        alvo_str = alvo.lower()
+        is_cat = df['categoria'].str.lower() == alvo_str
+        is_mod = df['modelo_ref'].str.lower() == alvo_str
         
-        modelos_config = {v.modelo.lower(): v.modelo.capitalize() for v in settings.veiculos}
-        df['modelo_ref'] = df['titulo'].apply(lambda t: next((m for s, m in modelos_config.items() if s in t.lower()), "Outros"))
-        df['versao'] = df['titulo'].apply(identificar_versao_precisa)
-        df['score'] = df.apply(calcular_score_tecnico, axis=1)
-        df['elite_score'] = df.apply(calcular_elite_score, axis=1)
+        df = df[is_cat | is_mod]
+        if df.empty: return f"❌ Nenhum registro encontrado para a categoria ou modelo: '{alvo}'."
 
-        # Filtros do YAML
-        df_v = pd.DataFrame()
-        for v_c in settings.veiculos:
-            nome = v_c.modelo.capitalize()
-            t = df[df['modelo_ref'] == nome].copy()
-            if hasattr(v_c, 'preco_maximo'): t = t[t['preco_anuncio'] <= v_c.preco_maximo]
-            if nome == "Yaris": t = t[t['versao'].isin(['XS', 'XLS'])]
-            df_v = pd.concat([df_v, t])
-
-        if modelo_alvo:
-            df_v = df_v[df_v['modelo_ref'].str.lower() == modelo_alvo.lower()]
+    top_5 = df.sort_values(by='elite_score', ascending=False).head(5)
+    
+    texto = f"🏆 <b>RANKING DE ELITE - {alvo.upper() if alvo else 'GERAL'}</b>\n\n"
+    medalhas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    
+    for i, (idx, row) in enumerate(top_5.iterrows()):
+        bairro = f"📍 {row['bairro'][:15]}" if row['bairro'] else "📍 Salvador"
+        texto += f"{medalhas[i]} <b>{row['modelo_ref'].upper()} {row['versao']} {row['ano']}</b>\n"
+        texto += f"⭐ Elite Score: <b>{row['elite_score']}</b> | {bairro}\n"
+        texto += f"💰 R$ {row['preco_anuncio']:,.0f} | 🛣️ {row['km']:,} km\n"
+        texto += f"🔗 <a href='{row['link']}'>Ver Anúncio</a>\n\n"
         
-        top_5 = df_v.sort_values(by='elite_score', ascending=False).head(5)
-        if top_5.empty: return "📭 Nenhum anúncio passou pelos filtros configurados."
-
-        texto = f"🏆 <b>RANKING DE ELITE - {modelo_alvo.upper() if modelo_alvo else 'GERAL'}</b>\n\n"
-        medalhas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-        for i, (idx, row) in enumerate(top_5.iterrows()):
-            bairro = f"📍 {row['bairro']}" if row['bairro'] else "📍 Salvador"
-            texto += f"{medalhas[i]} <b>{row['modelo_ref'].upper()} {row['versao']} {row['ano']}</b>\n"
-            texto += f"⭐ Elite: <b>{row['elite_score']}</b> | {bairro}\n"
-            texto += f"💰 R$ {row['preco_anuncio']:,.0f} | 🛣️ {row['km']:,} km\n"
-            texto += f"🔗 <a href='{row['link']}'>Ver Anúncio</a>\n\n"
-        return texto
-    except Exception as e:
-        return f"❌ Erro ao processar ranking: {e}"
+    return texto

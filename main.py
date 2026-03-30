@@ -101,11 +101,11 @@ def thread_telegram_listener(settings, repository, notifier):
                     # --- COMANDOS OPERACIONAIS ---
                     if texto in ["/help", "/start"]:
                         msg_help = (
-                            "<b>🏎️ MONITOR OLX SALVADOR v1.8.5</b>\n"
+                            "<b>🏎️ MONITOR OLX SALVADOR v2.0.0</b>\n"
                             "────────────────────────\n"
                             "🚀 /scan - Varredura Imediata\n"
                             "🥇 /top - Melhores Ofertas (Geral)\n"
-                            "🥇 /top [modelo] - Melhores de um modelo\n"
+                            "🥇 /top [modelo/categoria] - Ex: /top sedan\n"
                             "📊 /grafico - Dashboards de Mercado\n"
                             "📈 /status - Saúde do Sistema\n"
                             "⚙️ /config - Ajustar Pesos do Score\n"
@@ -117,15 +117,22 @@ def thread_telegram_listener(settings, repository, notifier):
                         notifier.enviar_alerta("⚡ <b>Sinal enviado!</b> Iniciando varredura...")
                         evento_scan_imediato.set()
 
-                    # --- NOVO COMANDO /TOP (RELATÓRIO DE ELITE) ---
+                    # --- COMANDO /TOP (AGORA COM SUPORTE A CATEGORIAS) ---
                     elif texto.startswith("/top"):
                         parts = texto.split()
-                        modelo_alvo = parts[1] if len(parts) > 1 else None
+                        alvo = parts[1] if len(parts) > 1 else None
                         
-                        notifier.enviar_alerta(f"🥇 <b>Garimpando Top 5 {modelo_alvo or 'Geral'} em Salvador...</b>")
+                        categorias_validas = ["hatch", "sedan", "suv"]
+                        
+                        if alvo in categorias_validas:
+                            notifier.enviar_alerta(f"🥇 <b>Buscando os melhores {alvo.upper()}S de Salvador...</b>")
+                        elif alvo:
+                            notifier.enviar_alerta(f"🥇 <b>Garimpando Top 5 {alvo.capitalize()} em Salvador...</b>")
+                        else:
+                            notifier.enviar_alerta("🥇 <b>Garimpando Top 5 Geral em Salvador...</b>")
                         
                         with db_lock:
-                            relatorio = obter_texto_elite(db_path_raw, modelo_alvo)
+                            relatorio = obter_texto_elite(db_path_raw, alvo)
                         notifier.enviar_alerta(relatorio)
 
                     elif texto == "/grafico":
@@ -134,7 +141,7 @@ def thread_telegram_listener(settings, repository, notifier):
                             arquivos = gerar_graficos_por_modelo(db_path_raw)
                         
                         if not arquivos:
-                            notifier.enviar_alerta("⚠️ Nenhum dado suficiente para gerar gráficos.")
+                            notifier.enviar_alerta("⚠️ Nenhum dado suficiente para gerar gráficos. Verifique seu settings.yaml.")
                         
                         for img in arquivos:
                             if os.path.exists(img):
@@ -184,7 +191,7 @@ def thread_telegram_listener(settings, repository, notifier):
             time.sleep(5)
 
 def main():
-    logger.info("🚀 MONITOR OLX v1.8.5 - SALVADOR EDITION INICIADO")
+    logger.info("🚀 MONITOR OLX v2.0.0 - SALVADOR EDITION INICIADO")
     try:
         settings = load_settings()
         repository = SQLiteRepository(settings.app.database_path)

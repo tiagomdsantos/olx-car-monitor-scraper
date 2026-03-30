@@ -15,42 +15,40 @@ filtros_globais:
   km_ano_maximo: 16000             # Média de Salvador é alta, mas 16k é o limite do bom senso
   ano_minimo: 2019                 # Carros mais velhos que 2019 perdem muito score de idade
   preco_maximo: 115000              # Seu teto orçamentário
-  fipe_alerta_abaixo_de_percentual: 75
+  fipe_alerta_abaixo_de_percentual: 78
   fipe_oportunidade_ate_percentual: 95 # Só calcula score e avisa se for abaixo de 95% da FIPE
 
 veiculos:
   - marca: "toyota"
-    modelo: "corolla"
-    preco_maximo: 115000 
-    versoes_aceitas: ["todas"]
+    modelo: "yaris"
+    preco_maximo: 105000
+    versoes_aceitas: ["xs", "xls"]
+    categoria: "hatch" # Ou sedan, dependendo do que você busca
 
   - marca: "honda"
     modelo: "city"
-    complemento_busca: "hatch" 
+    categoria: "hatch" 
     preco_maximo: 115000 
-    versoes_aceitas: ["exl", "touring"]
-
-  - marca: "honda"
-    modelo: "wr-v"
-    preco_maximo: 105000 
-    versoes_aceitas: ["ex", "exl"]
+    versoes_aceitas: ["todas"]
 
   - marca: "nissan"
     modelo: "kicks"
     preco_maximo: 110000
+    categoria: "suv"
     versoes_aceitas: ["advance", "exclusive", "sv", "sl"]
 
-  - marca: "nissan"
-    modelo: "sentra"
-    preco_maximo: 115000
-    versoes_aceitas: ["advance", "exclusive", "sv", "sl"]
+  - marca: "honda"
+    modelo: "wr-v"
+    preco_maximo: 105000 
+    categoria: "suv"
+    versoes_aceitas: ["ex", "exl"]
 
   - marca: "nissan"
     modelo: "versa" 
     preco_maximo: 95000 
-    versoes_aceitas: ["advance", "exclusive", "sv", "sl"]
+    versoes_aceitas: ["advance", "exclusive", "sv", "sl", "Unique"]
 
   - marca: "toyota"
-    modelo: "yaris"
-    preco_maximo: 105000
-    versoes_aceitas: ["xs", "xls"]
+    modelo: "corolla"
+    preco_maximo: 115000 
+    versoes_aceitas: ["todas"]
