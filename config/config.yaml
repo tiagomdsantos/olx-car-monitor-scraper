@@ -1,7 +1,7 @@
 # config/config.yaml
 
 app:
-  intervalo_scraping_minutos: 240
+  intervalo_scraping_minutos: 60
   database_path: "data/anuncios.db"
   
 score:
@@ -27,9 +27,10 @@ filtros_globais:
   km_ano_maximo: 12000             # Média de Salvador é alta, mas 16k é o limite
   ano_minimo: 2018                 # Carros mais velhos que 2019 perdem muito score
   preco_maximo: 115000              # Seu teto orçamentário
-  fipe_alerta_abaixo_de_percentual: 88
-  fipe_oportunidade_ate_percentual: 98
-
+  fipe_alerta_abaixo_de_percentual: 88    # Abaixo disso = Risco de Golpe
+  fipe_oportunidade_ate_percentual: 98    # Até isso = Negócio absurdo (Foguete)
+  fipe_aceitavel_ate_percentual: 102      # Até isso = Preço justo de mercado (Joinha)
+  
 veiculos:
   - marca: "toyota"
     modelo: "yaris"

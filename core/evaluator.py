@@ -195,14 +195,22 @@ class CarEvaluator:
         if score_calculado >= 100:
             logger.info(f"🏆 Score perfeito detectado: {score_calculado}") 
 
-        # --- 7. GATILHO DO TELEGRAM ---
-        alerta_max = getattr(self.settings.filtros_globais, 'fipe_oportunidade_ate_percentual', 95)
-        if percentual_fipe <= alerta_max:
-            logger.info(f"💎 OPORTUNIDADE ENCONTRADA: [{anuncio.id_anuncio}] Score: {score_calculado}/100.")
-            self._notificar_oportunidade(anuncio, preco_fipe, percentual_fipe, km_por_ano, origem_fipe, score_calculado)
+        # --- 7. GATILHO DO TELEGRAM (OPORTUNIDADE VS ACEITÁVEL) ---
+        oportunidade_max = getattr(self.settings.filtros_globais, 'fipe_oportunidade_ate_percentual', 98)
+        aceitavel_max = getattr(self.settings.filtros_globais, 'fipe_aceitavel_ate_percentual', 102)
+
+        if percentual_fipe <= oportunidade_max:
+            logger.info(f"💎 OPORTUNIDADE IMPERDÍVEL: [{anuncio.id_anuncio}] Score: {score_calculado}/100.")
+            self._notificar_alerta(anuncio, preco_fipe, percentual_fipe, km_por_ano, origem_fipe, score_calculado, tipo="oportunidade")
             return True
+            
+        elif percentual_fipe <= aceitavel_max:
+            logger.info(f"👍 FAIXA ACEITÁVEL: [{anuncio.id_anuncio}] Score: {score_calculado}/100.")
+            self._notificar_alerta(anuncio, preco_fipe, percentual_fipe, km_por_ano, origem_fipe, score_calculado, tipo="aceitavel")
+            return True
+            
         else:
-            logger.info(f"💵 Preço normal de mercado: [{anuncio.id_anuncio}] {percentual_fipe:.1f}% da FIPE (Acima do alerta). Silenciado.")
+            logger.debug(f"💵 Acima do Aceitável: [{anuncio.id_anuncio}] {percentual_fipe:.1f}% da FIPE. Silenciado.")
             return False
 
     # --- MOTOR DE SCORE (ALGORITMO V1.0) ---
@@ -241,13 +249,19 @@ class CarEvaluator:
         return "⭐⭐ (REGULAR)"
 
     # --- MÉTODOS DE NOTIFICAÇÃO ---
-    def _notificar_oportunidade(self, anuncio, preco_fipe, percentual, km_por_ano, origem_fipe, score):
+    def _notificar_alerta(self, anuncio, preco_fipe, percentual, km_por_ano, origem_fipe, score, tipo):
         titulo_seguro = html.escape(anuncio.titulo)
         estrelas = self._obter_estrelas(score)
         tag = "💎 <i>(OLX)</i>" if origem_fipe == "OLX" else "🤖 <i>(FIPE)</i>"
         
+        # Define o estilo da mensagem baseado no quão bom é o negócio
+        if tipo == "oportunidade":
+            cabecalho = f"<b>🚀 OPORTUNIDADE IMPERDÍVEL {estrelas}</b>"
+        else:
+            cabecalho = f"<b>👍 FAIXA ACEITÁVEL {estrelas}</b>"
+        
         msg = (
-            f"<b>🚀 {estrelas}</b>\n\n"
+            f"{cabecalho}\n\n"
             f"🏎️ <b>{titulo_seguro}</b>\n"
             f"🏆 Score: <b>{score}/100</b>\n\n"
             f"💰 Preço: <b>R$ {anuncio.preco:,.2f}</b>\n"
