@@ -34,8 +34,9 @@ class OLXPlaywrightScraper(IScraper):
 
                 # --- LOOP DE PAGINAÇÃO ---
                 for pagina_atual in range(1, max_paginas + 1):
-                    # A OLX usa ?o=1, ?o=2, etc para paginação
-                    url_pagina = f"{url_base}?o={pagina_atual}"
+                    # CORREÇÃO: Identifica se a URL já possui parâmetros para usar '&' ou '?'
+                    separador = "&" if "?" in url_base else "?"
+                    url_pagina = f"{url_base}{separador}o={pagina_atual}"
                     
                     logger.info(f"🌐 Acessando OLX (Página {pagina_atual}/{max_paginas}): {url_pagina}")
                     

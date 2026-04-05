@@ -15,13 +15,13 @@ class ParallelumFipeClient(IFipeClient):
         self._cache_modelos: Dict[str, List[Dict]] = {}
         self._headers = {'User-Agent': 'MonitorOfertasSalvador/2.0 (Python/Requests)'}
 
-    def _requisicao_segura(self, url: str, tentativas: int = 3) -> Optional[dict]:
+    def _requisicao_segura(self, url: str, tentativas: int = 1) -> Optional[dict]:
         for i in range(tentativas):
             time.sleep(1.5) # Respeito sagrado ao Rate Limit da Parallelum
             try:
                 response = requests.get(url, headers=self._headers, timeout=12)
                 if response.status_code == 429:
-                    espera = 35 * (i + 1)
+                    espera = 5 * (i + 1)
                     logger.warning(f"⏳ FIPE 429. Aguardando {espera}s...")
                     time.sleep(espera)
                     continue

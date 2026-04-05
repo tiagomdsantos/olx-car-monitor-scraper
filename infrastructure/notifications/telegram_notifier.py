@@ -61,3 +61,41 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"❌ Erro ao enviar gráfico para o Telegram: {e}")
             return False
+        
+    def configurar_menu_comandos(self, lista_comandos: list):
+        """
+        Registra a lista de comandos no menu de autocompletar do Telegram.
+        """
+        url = f"{self.url_base}/setMyCommands"
+        payload = {"commands": lista_comandos}
+        
+        try:
+            # Importante usar json=payload para o requests formatar a lista corretamente
+            response = requests.post(url, json=payload, timeout=15)
+            response.raise_for_status()
+            logger.info("✅ Menu de comandos nativo do Telegram configurado!")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Erro ao configurar o menu do Telegram: {e}")
+            return False
+        
+    def enviar_documento(self, caminho_arquivo: str):
+        """
+        Faz o upload de um arquivo físico para o chat do Telegram.
+        """
+        url = f"{self.url_base}/sendDocument"
+        try:
+            with open(caminho_arquivo, 'rb') as f:
+                # O requests precisa receber o arquivo no parâmetro 'files'
+                files = {'document': f}
+                data = {'chat_id': self.chat_id}
+                
+                # Aumentamos o timeout para 30s caso o arquivo de log esteja grande
+                response = requests.post(url, data=data, files=files, timeout=30)
+                response.raise_for_status()
+                
+            return True
+        except Exception as e:
+            # Não usamos logger.error aqui para não causar um loop infinito de erros de log
+            print(f"❌ Erro ao enviar documento para o Telegram: {e}")
+            return False

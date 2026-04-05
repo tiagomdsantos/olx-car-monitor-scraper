@@ -3,6 +3,17 @@
 app:
   intervalo_scraping_minutos: 240
   database_path: "data/anuncios.db"
+  
+score:
+  pesos:
+    preco: 0.4
+    km: 0.2
+    ano: 0.1
+    fipe: 0.3
+
+
+fipe:
+  dias_cache: 15
 
 # Nova estrutura: Lista de locais para o robô varrer
 localizacoes:
@@ -11,12 +22,13 @@ localizacoes:
 
 filtros_globais:
   motor_minimo: "1.2"
-  km_maximo_global: 100000          # Carros acima disso nem entram no score
-  km_ano_maximo: 16000             # Média de Salvador é alta, mas 16k é o limite do bom senso
-  ano_minimo: 2019                 # Carros mais velhos que 2019 perdem muito score de idade
+  km_minimo_global: 5000            # Ignora carros com KM suspeitamente baixa
+  km_maximo_global: 50000          # Carros acima disso nem entram no score
+  km_ano_maximo: 12000             # Média de Salvador é alta, mas 16k é o limite
+  ano_minimo: 2018                 # Carros mais velhos que 2019 perdem muito score
   preco_maximo: 115000              # Seu teto orçamentário
-  fipe_alerta_abaixo_de_percentual: 78
-  fipe_oportunidade_ate_percentual: 95 # Só calcula score e avisa se for abaixo de 95% da FIPE
+  fipe_alerta_abaixo_de_percentual: 88
+  fipe_oportunidade_ate_percentual: 98
 
 veiculos:
   - marca: "toyota"
@@ -28,25 +40,26 @@ veiculos:
   - marca: "honda"
     modelo: "city"
     categoria: "hatch" 
-    preco_maximo: 115000 
+    preco_maximo: 105000 
+    versoes_aceitas: ["todas"]
+
+  - marca: "honda"
+    modelo: "fit"
+    categoria: "hatch" 
+    preco_maximo: 85000 
     versoes_aceitas: ["todas"]
 
   - marca: "nissan"
     modelo: "kicks"
-    preco_maximo: 110000
+    preco_maximo: 115000
     categoria: "suv"
-    versoes_aceitas: ["advance", "exclusive", "sv", "sl"]
+    versoes_aceitas: ["advance", "exclusive"]
 
   - marca: "honda"
     modelo: "wr-v"
     preco_maximo: 105000 
     categoria: "suv"
     versoes_aceitas: ["ex", "exl"]
-
-  - marca: "nissan"
-    modelo: "versa" 
-    preco_maximo: 95000 
-    versoes_aceitas: ["advance", "exclusive", "sv", "sl", "Unique"]
 
   - marca: "toyota"
     modelo: "corolla"

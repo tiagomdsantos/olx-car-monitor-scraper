@@ -20,43 +20,14 @@ def identificar_versao_precisa(titulo):
         if v in tokens: return v.upper()
     return ""
 
-def calcular_score_tecnico(row):
-    """Cálculo base de oportunidade (0-100) baseado em FIPE, KM e Ano."""
-    if pd.isna(row['preco_fipe']) or row['preco_fipe'] <= 0:
-        return None
-    score = 0
-    # A) Preço vs FIPE (50%)
-    score += max(0, (100 - row['percentual_fipe']) * 2.5)
-    # B) KM/Uso (30%) - Referência de 17k km/ano como limite tolerável
-    idade = max(1, datetime.now().year - row['ano'])
-    km_ano = row['km'] / idade
-    score += max(0, (17000 - km_ano) * 0.003 * 10)
-    # C) Idade (20%)
-    score += max(0, (10 - idade) * 2)
-    return round(min(100, score), 1)
-
-def calcular_elite_score(row):
-    """Ranking final: Bônus para conservação."""
-    base = row['score'] if pd.notnull(row['score']) else 50.0
-    elite = base
-    idade = max(1, datetime.now().year - row['ano'])
-    
-    # Bônus: Carro Novo (<= 3 anos)
-    if idade <= 3: elite += 6
-    # Bônus: Baixa KM (< 10k km/ano)
-    if (row['km'] / idade) < 10000: elite += 8
-    # Penalidade: Termos de risco no título
-    t = str(row['titulo']).lower()
-    if any(x in t for x in ["urgente", "repasse", "detalhes", "detalhe"]): elite -= 12
-    
-    return round(elite, 1)
+# --- As funções antigas de calcular score foram removidas daqui para não conflitarem com o Banco de Dados ---
 
 # --- 2. MOTOR DE PLOTAGEM VISUAL ---
 
 def plotar_ranking_colorido(dataframe, title, filename):
     """Gera o dashboard de dispersão com mapa de calor RdYlGn."""
-    top_10 = dataframe.sort_values(by='score', ascending=False).head(10).copy()
-    top_10 = top_10.sort_values(by='elite_score', ascending=False)
+    # Como o score agora é único (elite_score), usamos ele para ordenar
+    top_10 = dataframe.sort_values(by='elite_score', ascending=False).head(10).copy()
     
     if top_10.empty: return None
 
@@ -76,7 +47,7 @@ def plotar_ranking_colorido(dataframe, title, filename):
         label_carro = f"{row['modelo_ref'].upper()} {row['versao']}".strip()
         
         plt.annotate(
-            f"{medalia} {label_carro}\nElite: {row['elite_score']} | Tec: {row['score']}pts",
+            f"{medalia} {label_carro}\nScore: {row['elite_score']}pts",
             (row['km'], row['preco_anuncio']),
             xytext=(0, 18), textcoords='offset points', ha='center', 
             fontsize=9, fontweight='bold', 
@@ -164,8 +135,15 @@ def preparar_dataframe(db_path, settings):
     df['categoria'] = df['categoria_final']
 
     df['versao'] = df['titulo'].apply(identificar_versao_precisa)
-    df['score'] = df.apply(calcular_score_tecnico, axis=1)
-    df['elite_score'] = df.apply(calcular_elite_score, axis=1)
+    
+    # >>> CORREÇÃO DO FANTASMA <<<
+    # Ao invés de recalcular, nós pegamos o elite_score que O EVALUATOR já calculou e salvou no banco
+    if 'elite_score' not in df.columns:
+        df['elite_score'] = 0.0
+    df['elite_score'] = df['elite_score'].fillna(0.0)
+    
+    # Ajusta o fallback visual para o plotar_ranking_colorido funcionar
+    df['score'] = df['elite_score']
 
     # Filtragem YAML (Preço e Regras de Negócio)
     df_filtrado = pd.DataFrame()
@@ -221,32 +199,71 @@ def gerar_graficos_por_modelo(db_path="data/anuncios.db"):
 
     return arquivos
 
-def obter_texto_elite(db_path="data/anuncios.db", alvo=None):
-    """Gera o ranking textual, aceitando Busca Geral, por Categoria ou por Modelo."""
+def obter_texto_elite(db_path="data/anuncios.db", categoria=None, tipo_vendedor=None):
+    """
+    Gera o ranking textual cruzando filtros de Categoria (Hatch/Sedan/SUV) e/ou Vendedor.
+    """
+    logger.debug(f"📊 Iniciando 'obter_texto_elite'. Parametros: categoria='{categoria}', vendedor='{tipo_vendedor}'")
     settings = load_settings()
+    
+    logger.debug("⏳ Chamando 'preparar_dataframe' para carregar os dados brutos...")
     df = preparar_dataframe(db_path, settings)
     
-    if df.empty: return "📭 Nenhum anúncio passou pelos filtros (YAML/Versão)."
+    if df.empty: 
+        logger.debug("📭 Dataframe vazio logo após o carregamento inicial. Abortando.")
+        return "📭 Nenhum anúncio passou pelos filtros globais iniciais."
 
-    # Se um alvo foi passado via Telegram (ex: /top sedan ou /top corolla)
-    if alvo:
-        alvo_str = alvo.lower()
-        is_cat = df['categoria'].str.lower() == alvo_str
-        is_mod = df['modelo_ref'].str.lower() == alvo_str
-        
-        df = df[is_cat | is_mod]
-        if df.empty: return f"❌ Nenhum registro encontrado para a categoria ou modelo: '{alvo}'."
+    logger.debug(f"📈 Dataframe carregado com sucesso. Total inicial: {len(df)} registros.")
 
-    top_5 = df.sort_values(by='elite_score', ascending=False).head(5)
+    # --- APLICAÇÃO DOS FILTROS (Múltiplos e Opcionais) ---
+    titulo_ranking = "GERAL"
     
-    texto = f"🏆 <b>RANKING DE ELITE - {alvo.upper() if alvo else 'GERAL'}</b>\n\n"
+    if categoria:
+        logger.debug(f"🔍 Aplicando filtro de categoria: '{categoria.upper()}'...")
+        if 'categoria' in df.columns:
+            df = df[df['categoria'].str.lower() == categoria.lower()]
+            titulo_ranking = categoria.upper()
+            logger.debug(f"📉 Após filtro de categoria, restaram {len(df)} registros.")
+        else:
+            logger.warning("⚠️ Atenção: A coluna 'categoria' não foi encontrada no DataFrame!")
+
+    if tipo_vendedor:
+        logger.debug(f"🔍 Aplicando filtro de vendedor: '{tipo_vendedor.upper()}'...")
+        coluna_vendedor = 'tipo_vendedor' if 'tipo_vendedor' in df.columns else 'vendedor' if 'vendedor' in df.columns else None
+        
+        if coluna_vendedor:
+            df = df[df[coluna_vendedor].str.lower() == tipo_vendedor.lower()]
+            titulo_ranking += f" ({tipo_vendedor.upper()})"
+            logger.debug(f"📉 Após filtro de vendedor ({coluna_vendedor}), restaram {len(df)} registros.")
+        else:
+            logger.warning("⚠️ A coluna de tipo de vendedor não existe no banco de dados atual.")
+            return "⚠️ A coluna de tipo de vendedor não existe no banco de dados atual."
+
+    if df.empty: 
+        logger.debug("📭 Todos os registros foram filtrados. O DataFrame ficou vazio.")
+        msg = f"❌ Nenhum registro encontrado "
+        if categoria: msg += f"na categoria '{categoria.upper()}' "
+        if tipo_vendedor: msg += f"do vendedor '{tipo_vendedor.upper()}'."
+        return msg
+
+    # --- MONTAGEM DO RANKING ---
+    logger.debug("🏆 Ordenando os resultados pela coluna 'elite_score'...")
+    top_5 = df.sort_values(by='elite_score', ascending=False).head(5)
+    logger.debug(f"✅ Top 5 selecionado (Total de {len(top_5)} veículos). Montando texto do Telegram...")
+    
+    texto = f"🏆 <b>RANKING DE ELITE - {titulo_ranking}</b>\n\n"
     medalhas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     
     for i, (idx, row) in enumerate(top_5.iterrows()):
-        bairro = f"📍 {row['bairro'][:15]}" if row['bairro'] else "📍 Salvador"
-        texto += f"{medalhas[i]} <b>{row['modelo_ref'].upper()} {row['versao']} {row['ano']}</b>\n"
-        texto += f"⭐ Elite Score: <b>{row['elite_score']}</b> | {bairro}\n"
-        texto += f"💰 R$ {row['preco_anuncio']:,.0f} | 🛣️ {row['km']:,} km\n"
-        texto += f"🔗 <a href='{row['link']}'>Ver Anúncio</a>\n\n"
+        bairro = f"📍 {row['bairro'][:15]}" if row.get('bairro') else "📍 Salvador"
+        modelo = row.get('modelo_ref', 'CARRO').upper()
+        versao = row.get('versao', '')
+        ano = row.get('ano', '')
         
+        texto += f"{medalhas[i]} <b>{modelo} {versao} {ano}</b>\n"
+        texto += f"⭐ Elite Score: <b>{row.get('elite_score', 0)}</b> | {bairro}\n"
+        texto += f"💰 R$ {row.get('preco_anuncio', 0):,.0f} | 🛣️ {row.get('km', 0):,} km\n"
+        texto += f"🔗 <a href='{row.get('link', '#')}'>Ver Anúncio</a>\n\n"
+        
+    logger.debug("🏁 Texto do ranking montado e pronto para envio.")
     return texto

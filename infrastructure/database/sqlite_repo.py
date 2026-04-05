@@ -43,7 +43,8 @@ class SQLiteRepository(IRepository):
                         link TEXT,
                         bairro TEXT,
                         data_processamento TEXT,
-                        categoria TEXT
+                        categoria TEXT,
+                        elite_score REAL
                     )
                 """)
 
@@ -66,7 +67,13 @@ class SQLiteRepository(IRepository):
                         PRIMARY KEY (marca, modelo, ano)
                     )
                 """)
-                
+                try:
+                    cursor.execute("ALTER TABLE anuncios_detalhados ADD COLUMN elite_score REAL DEFAULT 0.0")
+                    logger.info("🛠️ Banco de dados atualizado: Coluna 'elite_score' adicionada com sucesso!")
+                except sqlite3.OperationalError:
+                    # O erro dispara se a coluna já existir, então podemos ignorar silenciosamente
+                    pass
+                    
                 conn.commit()
                 logger.debug("✅ Estrutura do banco de dados verificada/criada com sucesso.")
         except Exception as e:
@@ -122,24 +129,22 @@ class SQLiteRepository(IRepository):
         except Exception as e:
             logger.error(f"Erro ao salvar anúncio processado {id_anuncio}: {e}")
 
-    def salvar_anuncio_completo(self, anuncio: Anuncio, preco_fipe: float):
+    def salvar_anuncio_completo(self, anuncio: Anuncio, preco_fipe: float, score: float = 0.0): # <-- Adiciona o parâmetro score
         try:
             percentual = (anuncio.preco / preco_fipe * 100) if preco_fipe > 0 else 0.0
             bairro = getattr(anuncio, 'bairro', '')
-            categoria = getattr(anuncio, 'categoria', '') # Captura a categoria do objeto Anuncio
+            categoria = getattr(anuncio, 'categoria', '')
 
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                
-                # Salva os detalhes ricos para os gráficos e comando /top
                 cursor.execute("""
                     INSERT OR REPLACE INTO anuncios_detalhados 
-                    (id_anuncio, titulo, preco_anuncio, preco_fipe, percentual_fipe, km, ano, link, bairro, data_processamento, categoria)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id_anuncio, titulo, preco_anuncio, preco_fipe, percentual_fipe, km, ano, link, bairro, data_processamento, categoria, elite_score)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     anuncio.id_anuncio, anuncio.titulo, anuncio.preco, preco_fipe, 
                     percentual, anuncio.km, anuncio.ano, anuncio.link, bairro, 
-                    datetime.now().isoformat(), categoria
+                    datetime.now().isoformat(), categoria, score # <-- Grava o score
                 ))
                 
                 # Marca também como processado para não avaliar de novo no próximo scan
@@ -206,3 +211,23 @@ class SQLiteRepository(IRepository):
                 conn.commit()
         except Exception as e:
             logger.error(f"Erro ao salvar cache FIPE: {e}")
+
+    def resetar_anuncios(self) -> bool:
+        """
+        Limpa o histórico e os dados detalhados de todos os anúncios.
+        Preserva a estrutura das tabelas, o cache da FIPE e os metadados do bot.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Deleta apenas as linhas de dados, mantendo as tabelas intactas
+                cursor.execute("DELETE FROM anuncios_processados")
+                cursor.execute("DELETE FROM anuncios_detalhados")
+                
+                conn.commit()
+                logger.info("🗑️ Banco de anúncios resetado com sucesso (Cache FIPE e Metadata preservados).")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Erro ao tentar resetar as tabelas de anúncios: {e}")
+            return False
