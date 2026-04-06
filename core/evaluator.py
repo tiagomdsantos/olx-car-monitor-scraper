@@ -41,15 +41,28 @@ class CarEvaluator:
         
         for index, anuncio in enumerate(anuncios, 1):
             try:
-                # O processar_anuncio agora retorna True se passou no funil e False se foi filtrado
-                if self.processar_anuncio(anuncio):
+                # --- 1. VERIFICAÇÃO DE CACHE (SILÊNCIO POR X DIAS) ---
+                # Se o carro já foi visto nos últimos 7 dias, pula pro próximo
+                if self.repository.anuncio_ja_processado(anuncio.id_anuncio, dias_expiracao=2):
+                    continue
+
+                # --- 2. AVALIAÇÃO DO FUNIL ---
+                # Se é um carro novo (ou um antigo que passou dos 7 dias), roda a matemática:
+                passou_no_funil = self.processar_anuncio(anuncio)
+                
+                if passou_no_funil:
                     aprovados += 1
                 else:
                     reprovados += 1
+                    
+                # --- 3. SALVAMENTO NO CACHE ---
+                # Independente de ser aprovado ou reprovado, marca o carro como "processado hoje"
+                self.repository.salvar_anuncio_processado(anuncio.id_anuncio)
+
             except Exception as e:
                 logger.error(f"❌ Erro crítico ao avaliar o anúncio {anuncio.id_anuncio}: {e}", exc_info=True)
                 
-        logger.info(f"📊 Resumo do Lote: {aprovados} Oportunidades Encontradas | {reprovados} Filtrados/Ignorados.")
+        logger.info(f"📊 Resumo do Lote: {aprovados} Oportunidades Notificadas | {reprovados} Filtradas/Ignoradas.")
 
     def processar_anuncio(self, anuncio) -> bool:
         """Avalia as regras do anúncio individual. Retorna True se for uma Oportunidade."""

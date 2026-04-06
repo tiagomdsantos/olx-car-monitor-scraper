@@ -107,27 +107,59 @@ class SQLiteRepository(IRepository):
 
     # --- ANÚNCIOS ---
 
-    def anuncio_ja_processado(self, id_anuncio: str) -> bool:
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1 FROM anuncios_processados WHERE id_anuncio = ?", (id_anuncio,))
-                return cursor.fetchone() is not None
-        except Exception as e:
-            logger.error(f"Erro ao checar anúncio {id_anuncio}: {e}")
-            return False
+    def anuncio_ja_processado(self, id_anuncio: str, dias_expiracao: int = 7) -> bool:
+        """
+        Verifica se o anúncio está na lista de processados e se o silêncio ainda é válido.
+        Se já tiverem passado 'dias_expiracao' (ex: 7 dias), permite que o bot volte a avaliar.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # 1. Tentar adicionar a coluna silenciosamente caso a base de dados seja a antiga
+            try:
+                cursor.execute("ALTER TABLE anuncios_processados ADD COLUMN data_processamento TEXT")
+            except sqlite3.OperationalError:
+                pass # A coluna já existe, podemos prosseguir
+
+            cursor.execute("SELECT data_processamento FROM anuncios_processados WHERE id_anuncio = ?", (id_anuncio,))
+            resultado = cursor.fetchone()
+            
+            if resultado:
+                data_str = resultado[0]
+                if data_str:
+                    data_salva = datetime.fromisoformat(data_str)
+                    agora = datetime.now()
+                    
+                    # Se já passaram os dias estipulados, retornamos False para ele ser reavaliado!
+                    if (agora - data_salva).days >= dias_expiracao:
+                        return False 
+                
+                # Caso não tenha data (registo antigo) ou ainda esteja no período de silêncio
+                return True
+                
+        return False
 
     def salvar_anuncio_processado(self, id_anuncio: str):
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT OR IGNORE INTO anuncios_processados (id_anuncio, data_processamento) VALUES (?, ?)",
-                    (id_anuncio, datetime.now().isoformat())
-                )
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Erro ao salvar anúncio processado {id_anuncio}: {e}")
+        """
+        Guarda o ID na base de dados com a data e hora actuais para iniciar a contagem.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            agora = datetime.now().isoformat()
+            
+            try:
+                cursor.execute("ALTER TABLE anuncios_processados ADD COLUMN data_processamento TEXT")
+            except sqlite3.OperationalError:
+                pass
+                
+            # Verifica se já existe para actualizar a data, ou insere um novo
+            cursor.execute("SELECT 1 FROM anuncios_processados WHERE id_anuncio = ?", (id_anuncio,))
+            if cursor.fetchone():
+                cursor.execute("UPDATE anuncios_processados SET data_processamento = ? WHERE id_anuncio = ?", (agora, id_anuncio))
+            else:
+                cursor.execute("INSERT INTO anuncios_processados (id_anuncio, data_processamento) VALUES (?, ?)", (id_anuncio, agora))
+                
+            conn.commit()
 
     def salvar_anuncio_completo(self, anuncio: Anuncio, preco_fipe: float, score: float = 0.0): # <-- Adiciona o parâmetro score
         try:
