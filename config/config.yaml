@@ -23,10 +23,10 @@ localizacoes:
 filtros_globais:
   motor_minimo: "1.2"
   km_minimo_global: 5000            # Ignora carros com KM suspeitamente baixa
-  km_maximo_global: 50000          # Carros acima disso nem entram no score
-  km_ano_maximo: 12000             # Média de Salvador é alta, mas 16k é o limite
-  ano_minimo: 2018                 # Carros mais velhos que 2019 perdem muito score
-  preco_maximo: 115000              # Seu teto orçamentário
+  km_maximo_global: 100000          # Carros acima disso nem entram no score
+  km_ano_maximo: 10000             # Média de Salvador é alta, mas 16k é o limite
+  ano_minimo: 2017                # Carros mais velhos que 2019 perdem muito score
+  preco_maximo: 95000              # Seu teto orçamentário
   fipe_alerta_abaixo_de_percentual: 88    # Abaixo disso = Risco de Golpe
   fipe_oportunidade_ate_percentual: 98    # Até isso = Negócio absurdo (Foguete)
   fipe_aceitavel_ate_percentual: 102      # Até isso = Preço justo de mercado (Joinha)
@@ -34,35 +34,34 @@ filtros_globais:
 veiculos:
   - marca: "toyota"
     modelo: "yaris"
-    preco_maximo: 105000
+    preco_maximo: 95000
     versoes_aceitas: ["xs", "xls"]
     categoria: "hatch" # Ou sedan, dependendo do que você busca
+    tipo_vendedor: "profissional"
 
   - marca: "honda"
     modelo: "city"
     categoria: "hatch" 
-    preco_maximo: 105000 
+    preco_maximo: 95000 
     versoes_aceitas: ["todas"]
+    tipo_vendedor: "profissional"
 
   - marca: "honda"
     modelo: "fit"
     categoria: "hatch" 
-    preco_maximo: 85000 
+    preco_maximo: 75000 
     versoes_aceitas: ["todas"]
+    tipo_vendedor: "profissional"
 
   - marca: "nissan"
     modelo: "kicks"
-    preco_maximo: 115000
+    preco_maximo: 95000
     categoria: "suv"
     versoes_aceitas: ["advance", "exclusive"]
-
-  - marca: "honda"
-    modelo: "wr-v"
-    preco_maximo: 105000 
-    categoria: "suv"
-    versoes_aceitas: ["ex", "exl"]
+    tipo_vendedor: "profissional"
 
   - marca: "toyota"
     modelo: "corolla"
-    preco_maximo: 115000 
+    preco_maximo: 95000 
     versoes_aceitas: ["todas"]
+    tipo_vendedor: "profissional"
